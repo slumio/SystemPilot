@@ -74,7 +74,7 @@ chmod +x build.sh
 ./build.sh
 ```
 
-The build script compiles with `-Ofast -flto -march=native` and links all HPC libraries. Expected output:
+The build script compiles with `-O3 -flto -march=native` and links all HPC libraries. Expected output:
 
 ```
 🛠️  Compiling SysPilot — High-Performance System Intelligence Suite
@@ -105,7 +105,7 @@ source ~/.syspilot/syspilot.sh
 ```bash
 ./syspilot daemon &
 ```
-The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tree, and listens on `/tmp/syspilot.sock`. It has near-zero CPU usage — no polling.
+The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tree, and listens on a private per-user UNIX socket under `$XDG_RUNTIME_DIR/syspilot/` or `/tmp/syspilot-<uid>/`. It has near-zero CPU usage — no polling.
 
 ### Live TUI Monitor
 ```bash
@@ -119,7 +119,7 @@ The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tre
 | `e` or `Enter` | AI root-cause explanation for selected process |
 | `s` | Send `SIGSTOP` (suspend) |
 | `r` | Send `SIGCONT` (resume) |
-| `k` | Send `SIGKILL` (terminate) |
+| `K` | Send `SIGKILL` (terminate) |
 | `q` | Quit |
 
 ### Explain Last Failed Command
@@ -171,7 +171,7 @@ Linux Kernel (cn_proc)
 syspilotd daemon
   ├─ concurrent_hash_map<pid, ProcessNode>   (Intel TBB)
   ├─ ConcurrentQueue<ProcessEventRecord>     (Moodycamel, lock-free)
-  └─ UNIX socket /tmp/syspilot.sock          (simdjson in, fmt out)
+  └─ private per-user UNIX socket           (simdjson in, JSON out)
       │
       ▼
 CausalTrace Engine
@@ -192,7 +192,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
 ```
 syspilot/
-├── build.sh                  # Build script (-Ofast -flto -march=native)
+├── build.sh                  # Build script (-O3 -flto -march=native)
 ├── src/
 │   ├── main.cpp              # CLI entry point & command router
 │   ├── daemon.cpp/h          # syspilotd: Netlink + UNIX socket server
@@ -202,7 +202,6 @@ syspilot/
 │   ├── codebase.cpp/h        # Vector DB + SIMD cosine similarity search
 │   ├── profiler.cpp/h        # perf CPU profiler integration
 │   ├── config.cpp/h          # JSON config read/write (~/.syspilot/)
-│   ├── safety.cpp/h          # Command safety allowlist
 │   ├── utils.cpp/h           # String, file, shell utilities
 │   ├── install.cpp/h         # Shell hook installer
 │   ├── ui/

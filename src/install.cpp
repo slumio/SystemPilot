@@ -4,6 +4,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <sys/stat.h>
 
 namespace install {
 
@@ -32,7 +33,7 @@ trap '__syspilot_preexec "$BASH_COMMAND"' DEBUG
 
 bool install() {
     std::string dir = utils::get_syspilot_directory();
-    utils::create_directory_recursive(dir);
+    utils::create_directory_private(dir);
     
     // Create log files if they don't exist
     const std::vector<std::string> files = {"session.log", "context.log", "command_start.log"};
@@ -41,6 +42,7 @@ bool install() {
         if (!utils::file_exists(path)) {
             std::ofstream file(path);
             file.close();
+            chmod(path.c_str(), 0600);
         }
     }
     
@@ -54,6 +56,7 @@ bool install() {
     // Write hook script
     std::string hook_path = dir + "/syspilot.sh";
     bool write_ok = utils::write_file_content(hook_path, HOOK_CONTENT);
+    chmod(hook_path.c_str(), 0600);
     if (!write_ok) {
         std::cerr << "❌ Failed to write hook script to " << hook_path << std::endl;
         return false;

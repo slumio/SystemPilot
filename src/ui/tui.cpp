@@ -24,8 +24,10 @@
 #include <iomanip>
 #include <sstream>
 #include <dirent.h>
+#include <filesystem>
 
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 namespace ui {
 
@@ -84,7 +86,8 @@ static std::string query_daemon_pids() {
     struct sockaddr_un addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, "/tmp/syspilot.sock", sizeof(addr.sun_path) - 1);
+    std::string sock_path = utils::get_runtime_socket_path();
+    std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
     
     struct timeval tv = {0, 50000}; // 50ms
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -281,6 +284,8 @@ void run_monitor() {
         // Keep selection within bounds
         if (processes.empty()) {
             selected_idx = 0;
+        } else if (selected_idx < 0) {
+            selected_idx = 0;
         } else if (selected_idx >= (int)processes.size()) {
             selected_idx = processes.size() - 1;
         }
@@ -341,7 +346,7 @@ void run_monitor() {
 
         // Draw footer / help
         int footer_row = height - 2;
-        print_at(footer_row, 3, "[Tab] Sort  [e] AI Explain  [s] SIGSTOP  [r] SIGCONT  [k] SIGKILL  [q] Quit", "\x1b[1;90m");
+        print_at(footer_row, 3, "[Tab] Sort  [e] AI Explain  [s] SIGSTOP  [r] SIGCONT  [K] SIGKILL  [q] Quit", "\x1b[1;90m");
 
         // Read input (non-blocking)
         fd_set fds;
@@ -379,7 +384,7 @@ void run_monitor() {
                         pid_t target_pid = processes[selected_idx].pid;
                         kill(target_pid, SIGCONT);
                     }
-                } else if (c == 'k') { // SIGKILL
+                } else if (c == 'K') { // SIGKILL
                     if (!processes.empty()) {
                         pid_t target_pid = processes[selected_idx].pid;
                         kill(target_pid, SIGKILL);
@@ -397,7 +402,7 @@ void run_monitor() {
 
                         Config conf = config::load();
                         json ctx;
-                        ctx["current_dir"] = utils::trim(utils::run_command_output("pwd"));
+                        ctx["current_dir"] = fs::current_path().string();
                         ctx["analysis_type"] = "causal_inference_diagnostics";
                         ctx["target_process"] = target_name;
                         ctx["target_pid"] = target_pid;

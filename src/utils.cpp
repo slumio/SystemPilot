@@ -1,15 +1,14 @@
 #include "utils.h"
 #include <algorithm>
-#include <array>
 #include <cctype>
-#include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -94,15 +93,40 @@ std::string get_syspilot_directory() {
 
 bool create_directory_recursive(const std::string &path) {
   try {
-    return fs::create_directories(path);
+    std::error_code ec;
+    if (fs::exists(path, ec)) {
+      return fs::is_directory(path, ec);
+    }
+    return fs::create_directories(path, ec) || fs::is_directory(path, ec);
   } catch (...) {
     return false;
   }
 }
 
+bool create_directory_private(const std::string &path) {
+  if (!create_directory_recursive(path)) {
+    return false;
+  }
+  return chmod(path.c_str(), 0700) == 0;
+}
+
 bool file_exists(const std::string &path) { return fs::exists(path); }
 
 bool is_directory(const std::string &path) { return fs::is_directory(path); }
+
+std::string get_runtime_socket_path() {
+  const char *runtime_dir = std::getenv("XDG_RUNTIME_DIR");
+  if (runtime_dir && runtime_dir[0] != '\0') {
+    std::string dir = std::string(runtime_dir) + "/syspilot";
+    if (create_directory_private(dir)) {
+      return dir + "/syspilot.sock";
+    }
+  }
+
+  std::string fallback = "/tmp/syspilot-" + std::to_string(getuid());
+  create_directory_private(fallback);
+  return fallback + "/syspilot.sock";
+}
 
 uint64_t get_file_size(const std::string &path) {
   try {
@@ -141,14 +165,8 @@ std::vector<std::string> list_directory(const std::string &path,
     if (recursive) {
       // Attempt to use 'rg' (ripgrep) for high-performance directory listing
       int exit_code = -1;
-      std::string escaped_path = path;
-      size_t pos = 0;
-      while ((pos = escaped_path.find('\'', pos)) != std::string::npos) {
-        escaped_path.replace(pos, 1, "'\\''");
-        pos += 4;
-      }
-      std::string cmd = "rg --files '" + escaped_path + "'";
-      std::string output = run_command_output(cmd, &exit_code);
+      std::string output = run_command_secure({"rg", "--files", path}, "",
+                                              &exit_code);
       if (exit_code == 0 && !output.empty()) {
         std::vector<std::string> lines = split(output, '\n');
         for (auto &line : lines) {
@@ -198,38 +216,36 @@ std::vector<std::string> list_directory(const std::string &path,
   return files;
 }
 
-std::string run_command_output(const std::string &cmd, int *exit_code) {
-  std::array<char, 512> buffer;
-  std::string result;
-  // Redirect stderr to stdout so we capture it as well
-  std::string cmd_with_stderr = cmd + " 2>&1";
-  std::unique_ptr<FILE, int (*)(FILE *)> pipe(
-      popen(cmd_with_stderr.c_str(), "r"), pclose);
-  if (!pipe) {
-    if (exit_code)
-      *exit_code = -1;
-    return "Failed to start process";
-  }
-  while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-    result += buffer.data();
-  }
-  int status = pclose(pipe.release());
-  if (exit_code) {
-    if (WIFEXITED(status)) {
-      *exit_code = WEXITSTATUS(status);
-    } else {
-      *exit_code = status;
-    }
-  }
-  return result;
-}
-
 bool write_file_content(const std::string &path, const std::string &content) {
   std::ofstream file(path);
   if (!file.is_open())
     return false;
   file << content;
   return true;
+}
+
+bool write_file_content_private(const std::string &path,
+                                const std::string &content) {
+  int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    return false;
+  }
+
+  size_t written = 0;
+  while (written < content.size()) {
+    ssize_t n = write(fd, content.data() + written, content.size() - written);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      close(fd);
+      return false;
+    }
+    written += (size_t)n;
+  }
+  bool ok = close(fd) == 0;
+  chmod(path.c_str(), 0600);
+  return ok;
 }
 
 std::string read_file_content(const std::string &path, bool *success) {

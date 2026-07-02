@@ -13,15 +13,22 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install Build Essentials
+    - name: Install Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential g++
+        sudo apt-get install -y \
+          build-essential g++ \
+          libmimalloc-dev libsimdjson-dev libspdlog-dev libfmt-dev \
+          libtbb-dev libcurl4-openssl-dev
 
     - name: Compile SysPilot
       run: |
         chmod +x ./build.sh
         ./build.sh
+
+    - name: Run Static Hardening Checks
+      run: |
+        bash tests/static_hardening_checks.sh
 
     - name: Verify Build Output
       run: |

@@ -14,7 +14,6 @@
 #include "install.h"
 #include "nlohmann/json.hpp"
 #include "profiler.h"
-#include "safety.h"
 #include "telemetry.h"
 #include "ui/streamer.h"
 #include "ui/tui.h"
@@ -22,6 +21,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -30,6 +30,7 @@
 #include <vector>
 
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 struct LogEntry {
   std::string timestamp;
@@ -240,8 +241,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 3 && std::string(argv[2]) == "--force") {
       force = true;
     }
-    std::string pwd = utils::run_command_output("pwd");
-    pwd = utils::trim(pwd);
+    std::string pwd = fs::current_path().string();
     codebase::update_index(pwd, conf, force);
   } else if (cmd == "config") {
     if (argc < 3) {
@@ -336,15 +336,15 @@ int main(int argc, char *argv[]) {
 
     // Build Context
     json ctx;
-    ctx["current_dir"] = utils::trim(utils::run_command_output("pwd"));
+    ctx["current_dir"] = fs::current_path().string();
     ctx["file_list"] =
-        utils::trim(utils::run_command_output("ls -lA 2>/dev/null"));
+        utils::trim(utils::run_command_secure({"ls", "-lA"}));
 
     if (utils::file_exists(".git")) {
       ctx["git_branch"] = utils::trim(
-          utils::run_command_output("git branch --show-current 2>/dev/null"));
+          utils::run_command_secure({"git", "branch", "--show-current"}));
       ctx["git_status"] = utils::trim(
-          utils::run_command_output("git status --porcelain 2>/dev/null"));
+          utils::run_command_secure({"git", "status", "--porcelain"}));
     }
 
     if (!file_path.empty()) {
@@ -411,7 +411,7 @@ int main(int argc, char *argv[]) {
     std::cout << "\n🤖 \x1b[1;36mSysPilot Explanation:\x1b[0m\n" << std::endl;
 
     json ctx;
-    ctx["current_dir"] = utils::trim(utils::run_command_output("pwd"));
+    ctx["current_dir"] = fs::current_path().string();
 
     if (!target_pid_or_name.empty()) {
       pid_t pid = telemetry::find_pid_by_name(target_pid_or_name);
@@ -446,7 +446,7 @@ int main(int argc, char *argv[]) {
         const char *home_env = std::getenv("HOME");
         std::string reports_dir =
             (home_env ? std::string(home_env) : ".") + "/syspilot_reports";
-        utils::run_command_output("mkdir -p " + reports_dir);
+        utils::create_directory_recursive(reports_dir);
 
         // Write DOT and HTML reports
         std::string ts = std::to_string(std::time(nullptr));
@@ -539,22 +539,22 @@ int main(int argc, char *argv[]) {
       ctx["exit_code"] = target_entry.exit_code;
       ctx["last_session_snippet"] = tail_session(100);
       ctx["file_list"] =
-          utils::trim(utils::run_command_output("ls -lA 2>/dev/null"));
+          utils::trim(utils::run_command_secure({"ls", "-lA"}));
 
       if (utils::file_exists(".git")) {
         ctx["git_branch"] = utils::trim(
-            utils::run_command_output("git branch --show-current 2>/dev/null"));
+            utils::run_command_secure({"git", "branch", "--show-current"}));
         ctx["git_status"] = utils::trim(
-            utils::run_command_output("git status --porcelain 2>/dev/null"));
+            utils::run_command_secure({"git", "status", "--porcelain"}));
       }
 
       if (deep) {
         ctx["disk_usage"] =
-            utils::trim(utils::run_command_output("df -h 2>/dev/null"));
+            utils::trim(utils::run_command_secure({"df", "-h"}));
         ctx["memory_usage"] =
-            utils::trim(utils::run_command_output("free -h 2>/dev/null"));
+            utils::trim(utils::run_command_secure({"free", "-h"}));
         ctx["open_ports"] =
-            utils::trim(utils::run_command_output("ss -tlnp 2>/dev/null"));
+            utils::trim(utils::run_command_secure({"ss", "-tlnp"}));
       }
 
       if (!no_index) {
