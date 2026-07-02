@@ -43,6 +43,14 @@ static std::vector<std::string> split_whitespace(const std::string &str) {
   return tokens;
 }
 
+static std::string redact_environment_entry(const std::string &entry) {
+  size_t eq = entry.find('=');
+  if (eq == std::string::npos) {
+    return entry;
+  }
+  return entry.substr(0, eq) + "=<redacted>";
+}
+
 namespace telemetry {
 
 pid_t find_pid_by_name(const std::string &name) {
@@ -218,7 +226,7 @@ ProcessTelemetry collect_process_telemetry(pid_t pid) {
       if (env_content[i] == '\0') {
         std::string var = env_content.substr(prev, i - prev);
         if (!var.empty()) {
-          pt.env.push_back(var);
+          pt.env.push_back(redact_environment_entry(var));
         }
         prev = i + 1;
       }
@@ -321,8 +329,7 @@ SystemTelemetry collect_system_telemetry() {
   }
 
   // 4. Read disk usage
-  st.disk_usage_summary =
-      utils::trim(utils::run_command_output("df -h / 2>/dev/null"));
+  st.disk_usage_summary = utils::trim(utils::run_command_secure({"df", "-h", "/"}));
 
   return st;
 }
@@ -400,9 +407,13 @@ std::string collect_ebpf_telemetry(pid_t pid, int duration_seconds) {
 
   if (getuid() == 0) {
     has_privileges = true;
-  } else if (std::system("sudo -n true 2>/dev/null") == 0) {
-    has_privileges = true;
-    bpftrace_cmd = "sudo bpftrace";
+  } else {
+    int sudo_exit = -1;
+    utils::run_command_secure({"sudo", "-n", "true"}, "", &sudo_exit);
+    if (sudo_exit == 0) {
+      has_privileges = true;
+      bpftrace_cmd = "sudo bpftrace";
+    }
   }
 
   if (!has_privileges) {
@@ -444,9 +455,14 @@ std::string collect_ebpf_telemetry(pid_t pid, int duration_seconds) {
       "  printf(\"EXEC | %s | %s\\n\", comm, str(args->filename)); "
       "}";
 
-  std::string cmd = "timeout " + std::to_string(duration_seconds) + " " +
-                    bpftrace_cmd + " -e '" + script + "' 2>/dev/null";
-  std::string output = utils::run_command_output(cmd);
+  std::vector<std::string> args = {"timeout", std::to_string(duration_seconds)};
+  if (bpftrace_cmd == "sudo bpftrace") {
+    args.push_back("sudo");
+  }
+  args.push_back("bpftrace");
+  args.push_back("-e");
+  args.push_back(script);
+  std::string output = utils::run_command_secure(args);
 
   std::vector<std::string> lines = utils::split(output, '\n');
   std::vector<std::string> opens;

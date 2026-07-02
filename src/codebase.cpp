@@ -7,9 +7,63 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <unordered_map>
 #include <unordered_set>
+#include <unistd.h>
 
 using json = nlohmann::json;
+
+static std::string curl_config_quote(const std::string& value) {
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '\\' || c == '"') out += '\\';
+        if (c == '\n' || c == '\r') out += ' ';
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+static std::string make_temp_path(const std::string& suffix) {
+    std::string dir = utils::get_syspilot_directory() + "/tmp";
+    utils::create_directory_private(dir);
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return dir + "/curl_" + std::to_string(getpid()) + "_" +
+           std::to_string(now) + suffix;
+}
+
+static std::string run_curl_configured(
+    const std::string& url, const std::vector<std::string>& headers,
+    const std::string& payload, int* exit_code) {
+    std::string payload_path = make_temp_path(".json");
+    std::string config_path = make_temp_path(".conf");
+    if (!utils::write_file_content_private(payload_path, payload)) {
+        if (exit_code) *exit_code = -1;
+        return "";
+    }
+
+    std::string config_text;
+    config_text += "silent\n";
+    config_text += "request = \"POST\"\n";
+    config_text += "url = " + curl_config_quote(url) + "\n";
+    config_text += "header = \"Content-Type: application/json\"\n";
+    for (const auto& header : headers) {
+        config_text += "header = " + curl_config_quote(header) + "\n";
+    }
+    config_text += "data-binary = " + curl_config_quote("@" + payload_path) + "\n";
+
+    if (!utils::write_file_content_private(config_path, config_text)) {
+        utils::delete_file(payload_path);
+        if (exit_code) *exit_code = -1;
+        return "";
+    }
+
+    std::string resp = utils::run_command_secure(
+        {"curl", "--config", config_path}, "", exit_code);
+    utils::delete_file(config_path);
+    utils::delete_file(payload_path);
+    return resp;
+}
 
 // Binary file serialization helpers
 static void write_string(std::ofstream& out, const std::string& str) {
@@ -430,17 +484,13 @@ static std::vector<std::vector<float>> fetch_embeddings_api(const std::vector<st
         jreq["requests"] = jrequests;
         
         std::string payload = jreq.dump();
-        std::string url = "https://generativelanguage.googleapis.com/v1beta/" + model + ":batchEmbedContents?key=" + config.gemini_api_key;
-        
-        std::vector<std::string> curl_args = {
-            "curl", "-s", "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", "@-",
-            url
+        std::string url = "https://generativelanguage.googleapis.com/v1beta/" + model + ":batchEmbedContents";
+        std::vector<std::string> headers = {
+            "x-goog-api-key: " + config.gemini_api_key
         };
         
         int exit_code = 0;
-        std::string resp = utils::run_command_secure(curl_args, payload, &exit_code);
+        std::string resp = run_curl_configured(url, headers, payload, &exit_code);
         
         if (exit_code == 0 && !resp.empty()) {
             try {
@@ -473,15 +523,8 @@ static std::vector<std::vector<float>> fetch_embeddings_api(const std::vector<st
             
             std::string url = config.ollama_url + "/api/embed";
             
-            std::vector<std::string> curl_args = {
-                "curl", "-s", "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "-d", "@-",
-                url
-            };
-            
             int exit_code = 0;
-            std::string resp = utils::run_command_secure(curl_args, payload, &exit_code);
+            std::string resp = run_curl_configured(url, {}, payload, &exit_code);
             
             if (exit_code == 0 && !resp.empty()) {
                 try {

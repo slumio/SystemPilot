@@ -11,6 +11,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "daemon.h"
+#include "nlohmann/json.hpp"
+#include "utils.h"
 #include "vendor/concurrentqueue.h"
 
 // ── System libraries ──────────────────────────────────────────────────────────
@@ -40,6 +42,8 @@
 #include <tbb/concurrent_hash_map.h>
 
 namespace daemon_service {
+
+using json = nlohmann::json;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Data structures
@@ -73,6 +77,8 @@ static ProcMap g_process_tree;
 static moodycamel::ConcurrentQueue<ProcessEventRecord> g_event_queue;
 
 static std::atomic<bool> g_running{true};
+static std::atomic<int> g_active_clients{0};
+static constexpr int MAX_CLIENT_THREADS = 64;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  /proc helpers  — small, cache-friendly reads
@@ -256,21 +262,20 @@ static void netlink_listener() {
 
 // Build process_tree JSON with {fmt} — no heap allocation via format_to
 static std::string build_process_tree_response() {
-    fmt::memory_buffer buf;
-    fmt::format_to(std::back_inserter(buf), R"({{"status":"ok","processes":[)");
+    json response;
+    response["status"] = "ok";
+    response["processes"] = json::array();
 
-    bool first = true;
-    // Iterate TBB map with const_accessor (shared read lock per bucket)
     for (auto it = g_process_tree.begin(); it != g_process_tree.end(); ++it) {
         const auto& n = it->second;
-        if (!first) fmt::format_to(std::back_inserter(buf), ",");
-        fmt::format_to(std::back_inserter(buf),
-            R"({{"pid":{},"ppid":{},"name":"{}","state":"{}"}})",
-            n.pid, n.ppid, n.name, (char)n.state);
-        first = false;
+        response["processes"].push_back({
+            {"pid", n.pid},
+            {"ppid", n.ppid},
+            {"name", std::string(n.name)},
+            {"state", std::string(1, n.state)}
+        });
     }
-    fmt::format_to(std::back_inserter(buf), "]}");
-    return fmt::to_string(buf);
+    return response.dump();
 }
 
 static std::string build_events_response() {
@@ -280,18 +285,19 @@ static std::string build_events_response() {
     ProcessEventRecord rec;
     while (g_event_queue.try_dequeue(rec)) snapshot.push_back(rec);
 
-    fmt::memory_buffer buf;
-    fmt::format_to(std::back_inserter(buf), R"({{"status":"ok","events":[)");
-    bool first = true;
+    json response;
+    response["status"] = "ok";
+    response["events"] = json::array();
     for (const auto& e : snapshot) {
-        if (!first) fmt::format_to(std::back_inserter(buf), ",");
-        fmt::format_to(std::back_inserter(buf),
-            R"({{"time":{},"type":"{}","pid":{},"ppid":{},"name":"{}"}})",
-            e.timestamp_ns, e.type, e.pid, e.ppid, e.name);
-        first = false;
+        response["events"].push_back({
+            {"time", e.timestamp_ns},
+            {"type", std::string(e.type)},
+            {"pid", e.pid},
+            {"ppid", e.ppid},
+            {"name", std::string(e.name)}
+        });
     }
-    fmt::format_to(std::back_inserter(buf), "]}");
-    return fmt::to_string(buf);
+    return response.dump();
 }
 
 static void handle_client(int client_fd) {
@@ -318,8 +324,10 @@ static void handle_client(int client_fd) {
         } else if (req_type == "events") {
             response = build_events_response();
         } else {
-            response = fmt::format(
-                R"({{"status":"error","message":"unknown request: {}"}})", req_type);
+            response = json({
+                {"status", "error"},
+                {"message", "unknown request: " + std::string(req_type)}
+            }).dump();
         }
     } catch (...) {
         response = R"({"status":"error","message":"invalid json"})";
@@ -337,8 +345,8 @@ static void handle_client(int client_fd) {
 }
 
 static void unix_socket_server() {
-    const char* sock_path = "/tmp/syspilot.sock";
-    unlink(sock_path);
+    std::string sock_path = utils::get_runtime_socket_path();
+    unlink(sock_path.c_str());
 
     int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (srv < 0) { spdlog::critical("[daemon] socket() failed"); return; }
@@ -346,13 +354,13 @@ static void unix_socket_server() {
     // SO_REUSEADDR + non-blocking accept via O_NONBLOCK select loop
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
 
     if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         spdlog::critical("[daemon] bind() failed: {}", strerror(errno));
         close(srv); return;
     }
-    chmod(sock_path, 0666);
+    chmod(sock_path.c_str(), 0600);
     listen(srv, 128);  // High backlog for bursty CLI queries
 
     spdlog::info("[daemon] UNIX socket listening at {}", sock_path);
@@ -364,12 +372,20 @@ static void unix_socket_server() {
 
         int client = accept(srv, nullptr, nullptr);
         if (client < 0) continue;
+        int active = g_active_clients.load(std::memory_order_relaxed);
+        if (active >= MAX_CLIENT_THREADS) {
+            close(client);
+            continue;
+        }
+        g_active_clients.fetch_add(1, std::memory_order_relaxed);
 
-        // Each client gets a detached thread — pool this in future
-        std::thread([client]{ handle_client(client); }).detach();
+        std::thread([client]{
+            handle_client(client);
+            g_active_clients.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
     }
     close(srv);
-    unlink(sock_path);
+    unlink(sock_path.c_str());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

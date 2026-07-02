@@ -9,8 +9,10 @@ CXX=${CXX:-g++}
 STD="-std=c++17"
 
 # ── Optimization Flags ───────────────────────────────────────────────────────
-OPT="-Ofast -flto -march=native -fomit-frame-pointer -funroll-loops"
-OPT="$OPT -fno-plt -ffast-math"          # No PLT stubs; relaxed FP
+OPT="-O3 -flto -march=native -fomit-frame-pointer -funroll-loops"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  OPT="$OPT -fno-plt"                     # No PLT stubs on ELF platforms
+fi
 OPT="$OPT -DNDEBUG"                       # Strip all asserts
 
 # ── Warning flags ────────────────────────────────────────────────────────────
@@ -23,7 +25,6 @@ INCLUDES="-Isrc -Isrc/vendor"
 SOURCES="
   src/main.cpp
   src/utils.cpp
-  src/safety.cpp
   src/config.cpp
   src/telemetry.cpp
   src/profiler.cpp
@@ -42,7 +43,7 @@ LIBS="$LIBS -lmimalloc"          # Microsoft mimalloc — global allocator
 LIBS="$LIBS -lsimdjson"          # SIMD-accelerated JSON (AVX2/SSE4)
 LIBS="$LIBS -lspdlog -lfmt"      # spdlog (async logging) + {fmt}
 LIBS="$LIBS -ltbb"               # Intel oneTBB (concurrent_hash_map)
-LIBS="$LIBS /lib/x86_64-linux-gnu/libcurl.so.4"   # HTTP for AI API
+LIBS="$LIBS -lcurl"             # HTTP for AI API
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 $CXX $STD $OPT $WARN $INCLUDES $SOURCES -o syspilot $LIBS

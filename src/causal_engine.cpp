@@ -15,8 +15,10 @@
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <simdjson.h>
 #include <spdlog/spdlog.h>
 
@@ -49,7 +51,8 @@ static std::string query_daemon() {
   struct sockaddr_un addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
-  std::strncpy(addr.sun_path, "/tmp/syspilot.sock", sizeof(addr.sun_path) - 1);
+  std::string sock_path = utils::get_runtime_socket_path();
+  std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
   
   struct timeval tv = {0, 50000}; // 50ms timeout
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -156,15 +159,23 @@ void CausalGraph::build_graph(int interval_seconds, bool use_ebpf,
                               pid_t target_pid) {
   arena.reset();
   bool ebpf_running = false;
-  std::string bpftrace_log = "/tmp/syspilot_bpftrace.log";
+  pid_t ebpf_pid = -1;
+  std::string bpftrace_dir = utils::get_syspilot_directory() + "/tmp";
+  utils::create_directory_private(bpftrace_dir);
+  std::string bpftrace_log = bpftrace_dir + "/syspilot_bpftrace_" +
+                             std::to_string(getpid()) + ".log";
   if (use_ebpf && target_pid > 0) {
-    std::string bpftrace_cmd = "bpftrace";
+    bool use_sudo = false;
     bool has_privileges = false;
     if (getuid() == 0) {
       has_privileges = true;
-    } else if (std::system("sudo -n true 2>/dev/null") == 0) {
-      has_privileges = true;
-      bpftrace_cmd = "sudo bpftrace";
+    } else {
+      int sudo_exit = -1;
+      utils::run_command_secure({"sudo", "-n", "true"}, "", &sudo_exit);
+      if (sudo_exit == 0) {
+        has_privileges = true;
+        use_sudo = true;
+      }
     }
 
     if (has_privileges) {
@@ -195,13 +206,42 @@ void CausalGraph::build_graph(int interval_seconds, bool use_ebpf,
                            "str(args->filename)); "
                            "}";
 
-      std::string cmd = "timeout " + std::to_string(interval_seconds) + " " +
-                        bpftrace_cmd + " -e '" + script + "' > " +
-                        bpftrace_log + " 2>/dev/null &";
-      utils::run_command_output(cmd);
-      ebpf_running = true;
-      std::cout << "🚀 [eBPF] Active tracing enabled for PID " << target_pid
-                << "..." << std::endl;
+      ebpf_pid = fork();
+      if (ebpf_pid == 0) {
+        int fd = open(bpftrace_log.c_str(),
+                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+          dup2(fd, STDOUT_FILENO);
+          close(fd);
+        }
+        int dev_null = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (dev_null >= 0) {
+          dup2(dev_null, STDERR_FILENO);
+          close(dev_null);
+        }
+
+        std::vector<std::string> args = {"timeout",
+                                         std::to_string(interval_seconds)};
+        if (use_sudo) {
+          args.push_back("sudo");
+        }
+        args.push_back("bpftrace");
+        args.push_back("-e");
+        args.push_back(script);
+
+        std::vector<char *> argv;
+        for (auto &arg : args) {
+          argv.push_back(const_cast<char *>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+        execvp(argv[0], argv.data());
+        std::exit(127);
+      }
+      ebpf_running = ebpf_pid > 0;
+      if (ebpf_running) {
+        std::cout << "🚀 [eBPF] Active tracing enabled for PID " << target_pid
+                  << "..." << std::endl;
+      }
     } else {
       std::cout << "⚠️  [eBPF] Insufficient privileges. Falling back to "
                    "standard procfs polling..."
@@ -491,6 +531,8 @@ void CausalGraph::build_graph(int interval_seconds, bool use_ebpf,
 
   // 7. Parse eBPF Tracing Log if enabled and run
   if (ebpf_running) {
+    int status = 0;
+    waitpid(ebpf_pid, &status, 0);
     // Sleep briefly to let the log write flush
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
@@ -1490,10 +1532,16 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
   oss << "    \n";
   oss << "    <script>\n";
   oss << "        const elements = " << elements_json << ";\n";
-  oss << "        const symptomDesc = \"" << symptom_desc << "\";\n";
+  oss << "        const symptomDesc = " << json(symptom_desc).dump() << ";\n";
   oss << "        document.getElementById('header-symptom').innerText = "
          "symptomDesc;\n";
   oss << "        \n";
+  oss << "        function escapeHtml(value) {\n";
+  oss << "            return String(value ?? '').replace(/[&<>\"']/g, ch => ({\n";
+  oss << "                '&': '&amp;', '<': '&lt;', '>': '&gt;',\n";
+  oss << "                '\"': '&quot;', \"'\": '&#39;'\n";
+  oss << "            }[ch]));\n";
+  oss << "        }\n";
   oss << "        // Intro Typing Simulation\n";
   oss << "        const consoleLines = [\n";
   oss << "            \"🚀 [SysPilot Engine] Initializing causal "
@@ -1521,7 +1569,7 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
   oss << "                div.style.animationDelay = `${currentLine * "
          "0.1}s`;\n";
   oss << "                div.innerHTML = `<span style=\"color: "
-         "var(--cyan)\">&gt;</span> ${consoleLines[currentLine]}`;\n";
+         "var(--cyan)\">&gt;</span> ${escapeHtml(consoleLines[currentLine])}`;\n";
   oss << "                consoleBox.appendChild(div);\n";
   oss << "                consoleBox.scrollTop = consoleBox.scrollHeight;\n";
   oss << "                currentLine++;\n";
@@ -1543,6 +1591,12 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
   oss << "            document.getElementById('inspect-subtitle').innerText = "
          "`ID: ${data.id}`;\n";
   oss << "            \n";
+  oss << "            const safe = {\n";
+  oss << "                type: escapeHtml(data.type),\n";
+  oss << "                state: escapeHtml(data.state),\n";
+  oss << "                anomaly_reason: escapeHtml(data.anomaly_reason || "
+         "'Process exhibiting anomalous resource or state metrics.')\n";
+  oss << "            };\n";
   oss << "            let html = '';\n";
   oss << "            if (data.is_anomalous) {\n";
   oss << "                html += `\n";
@@ -1550,8 +1604,7 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
          "Alert</div>\n";
   oss << "                    <div class=\"anomaly-alert\">\n";
   oss << "                        <strong>⚠️ Anomaly Detected</strong><br>\n";
-  oss << "                        ${data.anomaly_reason || 'Process exhibiting "
-         "anomalous resource or state metrics.'}\n";
+  oss << "                        ${safe.anomaly_reason}\n";
   oss << "                    </div>\n";
   oss << "                `;\n";
   oss << "            }\n";
@@ -1560,7 +1613,7 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
          "Info</div>`;\n";
   oss << "            html += `<div class=\"metric-card\"><span "
          "class=\"metric-label\">Node Type</span><span "
-         "class=\"metric-value\">${data.type.toUpperCase()}</span></div>`;\n";
+         "class=\"metric-value\">${safe.type.toUpperCase()}</span></div>`;\n";
   oss << "            \n";
   oss << "            if (data.type === 'process') {\n";
   oss << "                html += `\n";
@@ -1569,7 +1622,7 @@ CausalGraph::export_graph_to_html(const std::vector<std::string> &path_nodes) {
          "class=\"metric-value\">${data.pid}</span></div>\n";
   oss << "                    <div class=\"metric-card\"><span "
          "class=\"metric-label\">State</span><span "
-         "class=\"metric-value\">${data.state}</span></div>\n";
+         "class=\"metric-value\">${safe.state}</span></div>\n";
   oss << "                    <div class=\"metric-card\"><span "
          "class=\"metric-label\">CPU Usage</span><span "
          "class=\"metric-value\">${data.cpu_usage_pct.toFixed(1)}%</span></"

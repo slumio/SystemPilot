@@ -73,9 +73,9 @@ ls /proc/1/stat        # verify /proc is mounted
 ### What `build.sh` does
 
 ```bash
-g++ -std=c++17 -Ofast -flto -march=native \
+g++ -std=c++17 -O3 -flto -march=native \
     -fomit-frame-pointer -funroll-loops \
-    -fno-plt -ffast-math -DNDEBUG \
+    -fno-plt -DNDEBUG \
     -Isrc -Isrc/vendor \
     src/*.cpp src/ui/*.cpp \
     -o syspilot \
@@ -86,7 +86,7 @@ g++ -std=c++17 -Ofast -flto -march=native \
 Key flags:
 | Flag | Effect |
 |---|---|
-| `-Ofast` | `-O3` + `-ffast-math` + `-fno-signed-zeros` |
+| `-O3` | Aggressive optimization without relaxed floating-point semantics |
 | `-flto` | Link-time optimization (inlines across TUs) |
 | `-march=native` | Enable AVX2/FMA for SIMD cosine similarity |
 | `-fno-plt` | Eliminate PLT stubs for all shared library calls |
@@ -139,7 +139,6 @@ syspilot/
 │   │
 │   │   ── Infrastructure ──
 │   ├── config.cpp / .h          # ~/.syspilot/config.json
-│   ├── safety.cpp / .h          # Command allowlist
 │   ├── utils.cpp / .h           # String/file/shell helpers
 │   ├── install.cpp / .h         # Shell hook installer
 │   │
@@ -619,8 +618,10 @@ struct ProcessNode {
 ./syspilot daemon
 
 # Terminal 2 — query it
-echo '{"request":"process_tree"}' | nc -U /tmp/syspilot.sock | python3 -m json.tool | head -30
-echo '{"request":"events"}' | nc -U /tmp/syspilot.sock | python3 -m json.tool | head -20
+SOCK="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/syspilot/syspilot.sock}"
+SOCK="${SOCK:-/tmp/syspilot-$(id -u)/syspilot.sock}"
+echo '{"request":"process_tree"}' | nc -U "$SOCK" | python3 -m json.tool | head -30
+echo '{"request":"events"}' | nc -U "$SOCK" | python3 -m json.tool | head -20
 ```
 
 ### Simulate resource contention for CausalTrace
@@ -649,7 +650,7 @@ kill $WRITER_PID
 ```bash
 g++ -std=c++17 -g3 -O1 -fsanitize=address,undefined \
     -Isrc -Isrc/vendor \
-    src/main.cpp src/utils.cpp src/safety.cpp src/config.cpp \
+    src/main.cpp src/utils.cpp src/config.cpp \
     src/telemetry.cpp src/profiler.cpp src/codebase.cpp \
     src/causal_engine.cpp src/ai.cpp \
     src/ui/streamer.cpp src/ui/tui.cpp \

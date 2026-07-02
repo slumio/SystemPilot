@@ -24,17 +24,19 @@ std::string to_lower(std::string str);
 std::string get_home_directory();
 std::string get_syspilot_directory();
 bool create_directory_recursive(const std::string &path);
+bool create_directory_private(const std::string &path);
 bool file_exists(const std::string &path);
 bool is_directory(const std::string &path);
+std::string get_runtime_socket_path();
 uint64_t get_file_size(const std::string &path);
 uint64_t get_last_modified_time(const std::string &path);
 std::vector<std::string> list_directory(const std::string &path,
                                         bool recursive = true);
 
 // Subprocess helpers
-std::string run_command_output(const std::string &cmd,
-                               int *exit_code = nullptr);
 bool write_file_content(const std::string &path, const std::string &content);
+bool write_file_content_private(const std::string &path,
+                                const std::string &content);
 std::string read_file_content(const std::string &path, bool *success = nullptr);
 bool delete_file(const std::string &path);
 

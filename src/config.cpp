@@ -91,7 +91,7 @@ Config load() {
 
 bool save(const Config& conf) {
     std::string dir = utils::get_syspilot_directory();
-    utils::create_directory_recursive(dir);
+    utils::create_directory_private(dir);
     std::string path = dir + "/config.json";
     
     try {
@@ -106,7 +106,7 @@ bool save(const Config& conf) {
         j["embedding_model"] = conf.embedding_model;
         j["chunk_strategy"] = conf.chunk_strategy;
         
-        return utils::write_file_content(path, j.dump(4));
+        return utils::write_file_content_private(path, j.dump(4));
     } catch (...) {
         return false;
     }

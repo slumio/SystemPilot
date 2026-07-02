@@ -92,17 +92,17 @@ ProfileReport profile_process(pid_t pid, bool run_perf) {
     // 2. Perform perf profiling if requested
     if (run_perf) {
         int exit_code = 0;
-        utils::run_command_output("which perf", &exit_code);
+        utils::run_command_secure({"which", "perf"}, "", &exit_code);
         if (exit_code == 0) {
             report.perf_available = true;
             
             // Run perf record for 1.5 seconds
-            std::string perf_record_cmd = "perf record -F 99 -g -p " + pid_str + " -- sleep 1.5";
-            utils::run_command_output(perf_record_cmd);
+            utils::run_command_secure({"perf", "record", "-F", "99", "-g",
+                                       "-p", pid_str, "--", "sleep", "1.5"});
             
             // Generate report
-            std::string perf_report_cmd = "perf report --stdio --no-children --max-stack 12";
-            std::string perf_report = utils::run_command_output(perf_report_cmd);
+            std::string perf_report = utils::run_command_secure(
+                {"perf", "report", "--stdio", "--no-children", "--max-stack", "12"});
             
             // Clean up perf.data
             utils::delete_file("perf.data");

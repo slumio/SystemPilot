@@ -198,7 +198,7 @@ SysPilot is a performance-critical system. Any contribution that touches the hot
 
 | Path | Target | Measurement |
 |---|---|---|
-| Daemon socket response | < 2 ms (process_tree) | `time echo '{"request":"process_tree"}' \| nc -U /tmp/syspilot.sock` |
+| Daemon socket response | < 2 ms (process_tree) | `SOCK="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/syspilot/syspilot.sock}"; SOCK="${SOCK:-/tmp/syspilot-$(id -u)/syspilot.sock}"; time echo '{"request":"process_tree"}' \| nc -U "$SOCK"` |
 | `CausalGraph::build_graph()` | < 4 s (2s interval) | `time ./syspilot explain --pid $$ --causal` |
 | `trace_root_cause()` | < 1 ms | Add `chrono` instrumentation locally |
 | `cosine_similarity()` 1536-dim | < 1 µs (AVX2) | Micro-benchmark before/after |
@@ -244,7 +244,7 @@ We follow **Conventional Commits** format:
 
 ### Scopes
 
-`daemon`, `causal`, `telemetry`, `ai`, `tui`, `codebase`, `profiler`, `config`, `safety`, `utils`, `build`, `ci`, `docs`
+`daemon`, `causal`, `telemetry`, `ai`, `tui`, `codebase`, `profiler`, `config`, `utils`, `build`, `ci`, `docs`
 
 ### Examples
 
@@ -430,7 +430,7 @@ When reviewing pull requests, verify:
 - [ ] Hot-path changes have benchmark evidence in the PR description
 
 **Safety**
-- [ ] Any new OS command goes through `safety.cpp` allowlist check
+- [ ] Any new OS command uses argv-based execution instead of shell strings
 - [ ] No dynamic user input passed to `system()` or `popen()`
 - [ ] No reading of credential files or `/proc/[pid]/mem`
 

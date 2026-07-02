@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <memory>
 #include <array>
+#include <chrono>
+#include <unistd.h>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -32,6 +35,59 @@ const std::string REASONING_SYSTEM_PROMPT =
     "3. Wrap code or math snippets in backticks (`).\n"
     "4. Keep explanations concise, clear, and highly technical.";
 
+static std::string curl_config_quote(const std::string& value) {
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '\\' || c == '"') out += '\\';
+        if (c == '\n' || c == '\r') out += ' ';
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+static std::string make_temp_path(const std::string& suffix) {
+    std::string dir = utils::get_syspilot_directory() + "/tmp";
+    utils::create_directory_private(dir);
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return dir + "/curl_" + std::to_string(getpid()) + "_" +
+           std::to_string(now) + suffix;
+}
+
+static bool run_curl_configured_stream(
+    const std::string& url, const std::vector<std::string>& headers,
+    const std::string& payload, std::function<void(const std::string&)> cb,
+    int* exit_code) {
+    std::string payload_path = make_temp_path(".json");
+    std::string config_path = make_temp_path(".conf");
+
+    if (!utils::write_file_content_private(payload_path, payload)) {
+        return false;
+    }
+
+    std::string config_text;
+    config_text += "silent\n";
+    config_text += "no-buffer\n";
+    config_text += "request = \"POST\"\n";
+    config_text += "url = " + curl_config_quote(url) + "\n";
+    config_text += "header = \"Content-Type: application/json\"\n";
+    for (const auto& header : headers) {
+        config_text += "header = " + curl_config_quote(header) + "\n";
+    }
+    config_text += "data-binary = " + curl_config_quote("@" + payload_path) + "\n";
+
+    if (!utils::write_file_content_private(config_path, config_text)) {
+        utils::delete_file(payload_path);
+        return false;
+    }
+
+    bool ok = utils::run_command_secure_stream(
+        {"curl", "--config", config_path}, "", cb, exit_code);
+    utils::delete_file(config_path);
+    utils::delete_file(payload_path);
+    return ok;
+}
+
 bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer& streamer) {
     std::string url = "";
     std::vector<std::string> headers;
@@ -42,7 +98,8 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
             std::cerr << "❌ Gemini API key is not set. Run `syspilot config set-key gemini YOUR_KEY`" << std::endl;
             return false;
         }
-        url = "https://generativelanguage.googleapis.com/v1beta/models/" + config.gemini_model + ":streamGenerateContent?alt=sse&key=" + config.gemini_api_key;
+        url = "https://generativelanguage.googleapis.com/v1beta/models/" + config.gemini_model + ":streamGenerateContent?alt=sse";
+        headers.push_back("x-goog-api-key: " + config.gemini_api_key);
         
         json jreq;
         jreq["contents"] = json::array({ {{"parts", json::array({ {{"text", prompt}} })}} });
@@ -82,19 +139,6 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
         std::cerr << "❌ Unknown AI provider: " << config.active_provider << std::endl;
         return false;
     }
-    
-    // Construct command line arguments securely
-    std::vector<std::string> curl_args = {
-        "curl", "-s", "-N", "-X", "POST",
-        "-H", "Content-Type: application/json"
-    };
-    for (const auto& h : headers) {
-        curl_args.push_back("-H");
-        curl_args.push_back(h);
-    }
-    curl_args.push_back("-d");
-    curl_args.push_back("@-"); // Read payload from stdin
-    curl_args.push_back(url);
     
     std::string line_buffer = "";
     auto stream_cb = [&](const std::string& chunk) {
@@ -153,7 +197,7 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
     };
     
     int exit_code = 0;
-    bool success = utils::run_command_secure_stream(curl_args, payload, stream_cb, &exit_code);
+    bool success = run_curl_configured_stream(url, headers, payload, stream_cb, &exit_code);
     
     if (!success || exit_code != 0) {
         std::cerr << "❌ Secure curl invocation failed with exit code: " << exit_code << std::endl;

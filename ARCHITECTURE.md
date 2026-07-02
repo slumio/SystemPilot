@@ -38,7 +38,7 @@ SysPilot is a **single-binary** Linux diagnostic suite with three concurrent exe
 │            └───────────────────┼────────────────────┘           │
 │                                │                                │
 │            ┌───────────────────▼────────────────────┐           │
-│            │         UNIX socket /tmp/syspilot.sock  │           │
+│            │        private per-user UNIX socket     │           │
 │            └───────────────────┬────────────────────┘           │
 │                                │                                │
 │            ┌───────────────────▼────────────────────┐           │
@@ -69,7 +69,6 @@ src/
 ├── codebase.cpp          ← VectorDB + SIMD cosine similarity
 ├── profiler.cpp          ← Thread stacks + perf sampling
 ├── config.cpp            ← JSON config (~/.syspilot/config.json)
-├── safety.cpp            ← Command allowlist enforcement
 ├── utils.cpp             ← String/file/shell utilities
 ├── install.cpp           ← Shell hook installer
 └── ui/
@@ -88,7 +87,6 @@ main ──► causal_engine ──► telemetry
     ──► ui/tui         ──► causal_engine
                        ──► ai
     ──► config
-    ──► safety
 ```
 
 ---
@@ -410,7 +408,7 @@ enable_raw_mode()          ← termios: ICANON=0, ECHO=0, VMIN=1, VTIME=0
 │     'e'/↵    → suspend TUI → run CausalTrace+AI    │
 │     's'      → kill(pid, SIGSTOP)                  │
 │     'r'      → kill(pid, SIGCONT)                  │
-│     'k'      → kill(pid, SIGKILL)                  │
+│     'K'      → kill(pid, SIGKILL)                  │
 └─────────────────────────────────────────────────────┘
 restore_raw_mode()
 ```
@@ -563,19 +561,15 @@ main.cpp
 
 ### What SysPilot does NOT do
 - Does not write to any system files
-- Does not execute user-supplied strings in a shell (enforced by `src/safety.cpp`)
+- Avoids shell interpretation for subprocess calls; command arguments are passed
+  through `fork()`/`execvp()` helpers where practical
 - Does not read `/etc/shadow`, `/proc/[pid]/mem`, or any credential files
 - Does not send raw terminal output to the AI (only structured JSON)
 
-### Command safety allowlist (`src/safety.cpp`)
-
-All tools that execute system commands go through `safety.cpp`, which maintains:
-- An explicit **allowlist** of safe read-only commands (`ls`, `git status`, `df`, etc.)
-- A **denylist** of destructive patterns (`rm`, `mkfs`, `dd`, `chmod`, etc.)
-- Static analysis of the command string before any `fork()`/`exec()`
-
 ### UNIX socket permissions
-The daemon socket at `/tmp/syspilot.sock` is created with `chmod 0666` — world-readable so non-root users can query it. Only the daemon process writes to the process tree; clients are read-only consumers.
+The daemon socket is created under `$XDG_RUNTIME_DIR/syspilot/` when available,
+or `/tmp/syspilot-<uid>/` as a fallback. Both the runtime directory and socket
+are private to the current user.
 
 ---
 
