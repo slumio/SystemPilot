@@ -57,10 +57,17 @@ pid_t find_pid_by_name(const std::string &name) {
       break;
     }
   }
+  // FIX #5: Use strtol instead of safe_stoi to avoid silently mapping an
+  // out-of-range numeric string to PID 0 (the kernel swapper).
+  // strtol returns 0 on failure too, but we guard against it explicitly.
   if (is_digits) {
-    pid_t pid = safe_stoi(name);
-    if (utils::file_exists("/proc/" + std::to_string(pid))) {
-      return pid;
+    char* end_ptr = nullptr;
+    long pid_l = std::strtol(name.c_str(), &end_ptr, 10);
+    if (end_ptr != name.c_str() && pid_l > 0) {
+      pid_t pid = (pid_t)pid_l;
+      if (utils::file_exists("/proc/" + std::to_string(pid))) {
+        return pid;
+      }
     }
   }
 

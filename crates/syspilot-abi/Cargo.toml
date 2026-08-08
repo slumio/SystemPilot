@@ -1,0 +1,16 @@
+[package]
+name = "syspilot-abi"
+version = "0.1.0"
+edition = "2021"
+description = "Stable allocation-free kernel/userspace event ABI for SysPilot"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }

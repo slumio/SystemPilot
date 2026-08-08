@@ -74,6 +74,11 @@ static moodycamel::ConcurrentQueue<ProcessEventRecord> g_event_queue;
 
 static std::atomic<bool> g_running{true};
 
+// FIX #12: Limit concurrent client-handling threads to avoid thread exhaustion
+// under bursty CLI queries (e.g. a crash-looping process hammering the socket).
+static std::atomic<int> g_active_clients{0};
+static constexpr int    MAX_CLIENT_THREADS = 32;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  /proc helpers  — small, cache-friendly reads
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,15 +156,20 @@ static void netlink_listener() {
     int nl_fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_CONNECTOR);
     if (nl_fd < 0) {
         spdlog::warn("[daemon] No Netlink connector (not root?). Falling back to poll-less mode.");
+        g_running = false;  // FIX #3: signal socket thread to stop too
         return;
     }
 
     struct sockaddr_nl addr{};
     addr.nl_family = AF_NETLINK;
-    addr.nl_groups = CN_IDX_PROC;
+    // FIX #2: nl_groups is a BITMASK, not a plain index.
+    // CN_IDX_PROC is 1, so (1u << (CN_IDX_PROC - 1)) == 1 here, but the
+    // correct form is the bitmask expression — semantics matter on future kernels.
+    addr.nl_groups = (1u << (CN_IDX_PROC - 1));
     addr.nl_pid    = (uint32_t)getpid();
     if (bind(nl_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         spdlog::error("[daemon] Failed to bind Netlink socket: {}", strerror(errno));
+        g_running = false;  // FIX #3: prevent socket thread from running forever
         close(nl_fd); return;
     }
 
@@ -254,6 +264,19 @@ static void netlink_listener() {
 //  UNIX socket server — simdjson request parsing + fmt response building
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Escape a process name for safe embedding in a JSON string.
+// Handles backslash and double-quote which are the only chars /proc/comm can
+// realistically contain that would break JSON (via prctl PR_SET_NAME).
+static std::string json_escape_name(const char* raw) {
+    std::string out;
+    for (const char* p = raw; *p; ++p) {
+        if (*p == '"')       { out += '\\'; out += '"'; }
+        else if (*p == '\\') { out += '\\'; out += '\\'; }
+        else                 { out += *p; }
+    }
+    return out;
+}
+
 // Build process_tree JSON with {fmt} — no heap allocation via format_to
 static std::string build_process_tree_response() {
     fmt::memory_buffer buf;
@@ -264,9 +287,10 @@ static std::string build_process_tree_response() {
     for (auto it = g_process_tree.begin(); it != g_process_tree.end(); ++it) {
         const auto& n = it->second;
         if (!first) fmt::format_to(std::back_inserter(buf), ",");
+        // FIX #11: escape the name field so special chars don’t break simdjson
         fmt::format_to(std::back_inserter(buf),
             R"({{"pid":{},"ppid":{},"name":"{}","state":"{}"}})",
-            n.pid, n.ppid, n.name, (char)n.state);
+            n.pid, n.ppid, json_escape_name(n.name), (char)n.state);
         first = false;
     }
     fmt::format_to(std::back_inserter(buf), "]}");
@@ -365,8 +389,19 @@ static void unix_socket_server() {
         int client = accept(srv, nullptr, nullptr);
         if (client < 0) continue;
 
-        // Each client gets a detached thread — pool this in future
-        std::thread([client]{ handle_client(client); }).detach();
+        // FIX #12: Enforce a cap on concurrent client threads.
+        // If at capacity, close the connection immediately (the CLI will retry).
+        if (g_active_clients.load(std::memory_order_relaxed) >= MAX_CLIENT_THREADS) {
+            spdlog::warn("[daemon] Too many concurrent clients ({}); dropping connection.",
+                         MAX_CLIENT_THREADS);
+            close(client);
+            continue;
+        }
+        g_active_clients.fetch_add(1, std::memory_order_relaxed);
+        std::thread([client]{
+            handle_client(client);
+            g_active_clients.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
     }
     close(srv);
     unlink(sock_path);

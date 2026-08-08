@@ -1,0 +1,9 @@
+[package]
+name = "syspilot-collector"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded, priority-aware SysPilot collector handoff"
+license = "MIT"
+
+[dependencies]
+syspilot-abi = { path = "../syspilot-abi" }

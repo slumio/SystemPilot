@@ -42,7 +42,18 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
             std::cerr << "❌ Gemini API key is not set. Run `syspilot config set-key gemini YOUR_KEY`" << std::endl;
             return false;
         }
-        url = "https://generativelanguage.googleapis.com/v1beta/models/" + config.gemini_model + ":streamGenerateContent?alt=sse&key=" + config.gemini_api_key;
+        // Validate model name — the stored value "gemini" is not a real API model.
+        // Fall back to a known-good default if it looks wrong.
+        std::string gmodel = config.gemini_model;
+        if (gmodel.empty() || gmodel == "gemini" ||
+            (gmodel.find('/') == std::string::npos &&
+             gmodel.find('-') == std::string::npos)) {
+            gmodel = "gemini-2.0-flash";
+        }
+        // Pass API key as header, not URL query param (keys in URLs appear in server logs).
+        url = "https://generativelanguage.googleapis.com/v1beta/models/"
+              + gmodel + ":streamGenerateContent?alt=sse";
+        headers.push_back("x-goog-api-key: " + config.gemini_api_key);
         
         json jreq;
         jreq["contents"] = json::array({ {{"parts", json::array({ {{"text", prompt}} })}} });
@@ -83,9 +94,11 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
         return false;
     }
     
-    // Construct command line arguments securely
+    // Build curl arguments — secure execvp invocation, no shell injection
     std::vector<std::string> curl_args = {
         "curl", "-s", "-N", "-X", "POST",
+        "--max-time", "120",        // hard timeout — prevents infinite hang on network issues
+        "--connect-timeout", "15", // fail fast if DNS/TCP fails
         "-H", "Content-Type: application/json"
     };
     for (const auto& h : headers) {
@@ -96,8 +109,13 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
     curl_args.push_back("@-"); // Read payload from stdin
     curl_args.push_back(url);
     
+    // FIX #8: `done` flag persists across callback invocations.
+    // The previous `break` only exited the inner while loop; on the next chunk
+    // from curl the callback would be invoked again and keep processing.
+    bool done = false;
     std::string line_buffer = "";
     auto stream_cb = [&](const std::string& chunk) {
+        if (done) return;  // stop processing after [DONE] is seen
         line_buffer += chunk;
         size_t newline_pos = 0;
         while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
@@ -136,7 +154,10 @@ bool query_ai_stream(const Config& config, const std::string& prompt, MdStreamer
             else if (config.active_provider == "syspilot") {
                 if (utils::starts_with(line, "data: ")) {
                     std::string data = utils::trim(line.substr(6));
-                    if (data == "[DONE]") break;
+                    if (data == "[DONE]") {
+                        done = true;  // FIX #8: mark done so outer callback exits immediately
+                        return;
+                    }
                     if (data.empty()) continue;
                     try {
                         json jdata = json::parse(data);

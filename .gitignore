@@ -3,7 +3,7 @@ syspilot
 *.o
 *.obj
 *.out
-
+build/
 # Rust Legacy Build Artifacts
 /target/
 Cargo.lock

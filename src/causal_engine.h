@@ -53,6 +53,12 @@ private:
 public:
     explicit StringArena(size_t slab = 256 * 1024)
         : chunk_size(slab), current_chunk(0), current_offset(0) {
+        // FIX #1: Reserve outer vector so it never reallocates its own storage.
+        // Each element is a std::vector<char> whose internal buffer has a stable
+        // address. If the outer vector were to resize, ALL previously returned
+        // string_views would become dangling pointers — silent UB.
+        // 64 slabs × 256 KiB = 16 MiB max arena; well above any realistic graph.
+        chunks.reserve(64);
         chunks.emplace_back(slab);
     }
 
@@ -116,6 +122,9 @@ public:
     void build_graph(int interval_seconds = 2, bool use_ebpf = false,
                      pid_t target_pid = 0);
 
+    // FIX #9: This method must NOT modify `edges` or `nodes` during traversal.
+    // BFS enqueues string_views that alias arena memory; any structural
+    // mutation of those containers during iteration causes UB.
     std::vector<std::string> trace_root_cause(const std::string& start_node_id);
 
     std::string serialize_chain_to_json(const std::vector<std::string>& path_nodes);

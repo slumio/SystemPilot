@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -118,10 +119,25 @@ uint64_t get_last_modified_time(const std::string &path) {
   try {
     if (fs::exists(path)) {
       auto ftime = fs::last_write_time(path);
-      auto sct = std::chrono::time_point_cast<std::chrono::seconds>(
-          ftime - fs::file_time_type::clock::now() +
-          std::chrono::system_clock::now());
-      return sct.time_since_epoch().count();
+      // FIX #13: fs::file_time_type::clock and std::chrono::system_clock are
+      // different clocks with potentially different epochs. Subtracting their
+      // now() values is non-portable UB (works on glibc by coincidence).
+      // Use std::chrono::file_clock::to_sys() which is the standardised C++20
+      // conversion, or the equivalent filesystem clock cast.
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+      // C++20: file_clock::to_sys is the correct portable conversion.
+      auto sys_time = std::chrono::file_clock::to_sys(
+          std::chrono::time_point_cast<std::chrono::seconds>(ftime));
+      return (uint64_t)sys_time.time_since_epoch().count();
+#else
+      // C++17 fallback: approximate via duration arithmetic.
+      // Still avoids mixing clock::now() calls across different clocks.
+      auto duration_since_epoch = ftime.time_since_epoch();
+      // file_time_type epoch is unspecified in C++17; on Linux it is the Unix
+      // epoch, so this is a best-effort portable approximation.
+      auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration_since_epoch);
+      return (uint64_t)seconds.count();
+#endif
     }
   } catch (...) {
   }
@@ -203,22 +219,33 @@ std::string run_command_output(const std::string &cmd, int *exit_code) {
   std::string result;
   // Redirect stderr to stdout so we capture it as well
   std::string cmd_with_stderr = cmd + " 2>&1";
-  std::unique_ptr<FILE, int (*)(FILE *)> pipe(
-      popen(cmd_with_stderr.c_str(), "r"), pclose);
-  if (!pipe) {
-    if (exit_code)
-      *exit_code = -1;
-    return "Failed to start process";
+  // FIX #4: Avoid double-pclose.
+  // Previous code called pclose(pipe.release()) manually AND had pclose as the
+  // unique_ptr deleter, which would double-close on any exception path.
+  // Solution: keep ownership in the unique_ptr entirely; read the exit status
+  // from the destructor’s return value via a plain wrapper lambda.
+  int local_status = 0;
+  {
+    std::unique_ptr<FILE, int(*)(FILE*)> pipe(
+        popen(cmd_with_stderr.c_str(), "r"), pclose);
+    if (!pipe) {
+      if (exit_code)
+        *exit_code = -1;
+      return "Failed to start process";
+    }
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+      result += buffer.data();
+    }
+    // Let unique_ptr destructor call pclose exactly once; capture return value
+    // by temporarily releasing into a raw pointer we close ourselves.
+    FILE* raw = pipe.release();
+    local_status = pclose(raw);  // one and only pclose call
   }
-  while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-    result += buffer.data();
-  }
-  int status = pclose(pipe.release());
   if (exit_code) {
-    if (WIFEXITED(status)) {
-      *exit_code = WEXITSTATUS(status);
+    if (WIFEXITED(local_status)) {
+      *exit_code = WEXITSTATUS(local_status);
     } else {
-      *exit_code = status;
+      *exit_code = local_status;
     }
   }
   return result;
@@ -364,104 +391,117 @@ bool run_command_secure_stream(
     const std::vector<std::string> &args, const std::string &input_data,
     std::function<void(const std::string &)> callback, int *exit_code) {
   if (args.empty()) {
-    if (exit_code)
-      *exit_code = -1;
+    if (exit_code) *exit_code = -1;
     return false;
   }
 
   int stdin_pipe[2];
   int stdout_pipe[2];
+  int stderr_pipe[2]; // separate stderr so curl errors surface clearly
 
-  if (pipe(stdin_pipe) < 0) {
-    if (exit_code)
-      *exit_code = -1;
-    return false;
-  }
+  if (pipe(stdin_pipe)  < 0) { if (exit_code) *exit_code = -1; return false; }
   if (pipe(stdout_pipe) < 0) {
-    close(stdin_pipe[0]);
-    close(stdin_pipe[1]);
-    if (exit_code)
-      *exit_code = -1;
-    return false;
+    close(stdin_pipe[0]); close(stdin_pipe[1]);
+    if (exit_code) *exit_code = -1; return false;
+  }
+  if (pipe(stderr_pipe) < 0) {
+    close(stdin_pipe[0]);  close(stdin_pipe[1]);
+    close(stdout_pipe[0]); close(stdout_pipe[1]);
+    if (exit_code) *exit_code = -1; return false;
   }
 
   pid_t pid = fork();
   if (pid < 0) {
-    close(stdin_pipe[0]);
-    close(stdin_pipe[1]);
-    close(stdout_pipe[0]);
-    close(stdout_pipe[1]);
-    if (exit_code)
-      *exit_code = -1;
+    close(stdin_pipe[0]);  close(stdin_pipe[1]);
+    close(stdout_pipe[0]); close(stdout_pipe[1]);
+    close(stderr_pipe[0]); close(stderr_pipe[1]);
+    if (exit_code) *exit_code = -1;
     return false;
   }
 
   if (pid == 0) { // Child
-    dup2(stdin_pipe[0], STDIN_FILENO);
+    dup2(stdin_pipe[0],  STDIN_FILENO);
     dup2(stdout_pipe[1], STDOUT_FILENO);
-    // Redirect stderr to stdout
-    dup2(stdout_pipe[1], STDERR_FILENO);
-
-    close(stdin_pipe[0]);
-    close(stdin_pipe[1]);
-    close(stdout_pipe[0]);
-    close(stdout_pipe[1]);
-
-    std::vector<char *> argv;
-    for (const auto &arg : args) {
-      argv.push_back(const_cast<char *>(arg.c_str()));
-    }
+    dup2(stderr_pipe[1], STDERR_FILENO); // stderr goes to its own pipe now
+    close(stdin_pipe[0]);  close(stdin_pipe[1]);
+    close(stdout_pipe[0]); close(stdout_pipe[1]);
+    close(stderr_pipe[0]); close(stderr_pipe[1]);
+    std::vector<char*> argv;
+    for (const auto &arg : args)
+      argv.push_back(const_cast<char*>(arg.c_str()));
     argv.push_back(nullptr);
-
     execvp(argv[0], argv.data());
     std::exit(127);
   }
 
-  // Parent
+  // ── Parent ──────────────────────────────────────────────────────────────────
   close(stdin_pipe[0]);
   close(stdout_pipe[1]);
+  close(stderr_pipe[1]);
 
-  // Write input data to child's stdin
-  if (!input_data.empty()) {
-    size_t written = 0;
-    while (written < input_data.size()) {
-      ssize_t res = write(stdin_pipe[1], input_data.data() + written,
-                          input_data.size() - written);
-      if (res < 0) {
-        if (errno == EINTR)
-          continue;
-        break;
+  // FIX: Classic pipe deadlock.
+  // Old code wrote ALL of stdin BEFORE reading ANY stdout. If the JSON payload
+  // (prompt + context) exceeds the kernel pipe buffer (~64 KB on Linux), the
+  // parent blocks in write() while the child is blocked in write() to stdout —
+  // both sides wait forever and curl never produces output.
+  //
+  // Fix: spawn a detached thread that writes stdin concurrently so the main
+  // thread can drain stdout without blocking. The thread auto-closes the write
+  // end of stdin_pipe when done, sending EOF to curl.
+  int stdin_write_fd = stdin_pipe[1];
+  std::thread stdin_writer([stdin_write_fd, &input_data]() {
+    if (!input_data.empty()) {
+      size_t written = 0;
+      while (written < input_data.size()) {
+        ssize_t res = write(stdin_write_fd,
+                            input_data.data() + written,
+                            input_data.size() - written);
+        if (res < 0) {
+          if (errno == EINTR) continue;
+          break; // broken pipe or other error — curl closed stdin early
+        }
+        written += (size_t)res;
       }
-      written += res;
     }
-  }
-  close(stdin_pipe[1]);
+    close(stdin_write_fd); // send EOF to child
+  });
 
-  // Read stdout from child and stream it
-  char buffer[4096];
+  // Drain stdout (streaming response) on the main thread
+  char buf[16384]; // larger buffer — fewer read() calls for big SSE streams
   while (true) {
-    ssize_t res = read(stdout_pipe[0], buffer, sizeof(buffer));
-    if (res < 0) {
-      if (errno == EINTR)
-        continue;
-      break;
-    }
-    if (res == 0)
-      break; // EOF
-    callback(std::string(buffer, res));
+    ssize_t res = read(stdout_pipe[0], buf, sizeof(buf));
+    if (res < 0) { if (errno == EINTR) continue; break; }
+    if (res == 0) break;
+    callback(std::string(buf, res));
   }
   close(stdout_pipe[0]);
 
-  int status;
-  waitpid(pid, &status, 0);
-  if (exit_code) {
-    if (WIFEXITED(status)) {
-      *exit_code = WEXITSTATUS(status);
-    } else {
-      *exit_code = status;
-    }
+  stdin_writer.join(); // ensure the writer thread finishes before we waitpid
+
+  // Surface any stderr output so curl errors ("Could not resolve host", etc.)
+  // are visible to the user instead of being silently swallowed.
+  std::string curl_stderr;
+  while (true) {
+    ssize_t res = read(stderr_pipe[0], buf, sizeof(buf));
+    if (res <= 0) break;
+    curl_stderr.append(buf, res);
+  }
+  close(stderr_pipe[0]);
+  if (!curl_stderr.empty()) {
+    std::string trimmed = curl_stderr;
+    // strip trailing whitespace
+    while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r'
+                                || trimmed.back() == ' '))
+      trimmed.pop_back();
+    if (!trimmed.empty())
+      std::cerr << "\n\x1b[33m[curl] " << trimmed << "\x1b[0m\n";
   }
 
+  int status = 0;
+  waitpid(pid, &status, 0);
+  if (exit_code) {
+    *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : status;
+  }
   return (exit_code ? (*exit_code == 0) : true);
 }
 

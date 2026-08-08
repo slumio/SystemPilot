@@ -410,6 +410,13 @@ int main(int argc, char *argv[]) {
 
     std::cout << "\n🤖 \x1b[1;36mSysPilot Explanation:\x1b[0m\n" << std::endl;
 
+    // FIX (low): --causal without --pid has no target process to build a
+    // causal graph from. Catch this early with a helpful error.
+    if (causal && target_pid_or_name.empty()) {
+      std::cerr << "❌ --causal requires a target process. Use: syspilot explain --pid <name|pid> --causal\n";
+      return 1;
+    }
+
     json ctx;
     ctx["current_dir"] = utils::trim(utils::run_command_output("pwd"));
 
@@ -529,7 +536,10 @@ int main(int argc, char *argv[]) {
       std::vector<LogEntry> recent = read_recent_entries(offset);
       LogEntry target_entry;
       if (!recent.empty()) {
-        target_entry = recent.back();
+      // FIX #10: read_recent_entries(offset) returns up to `offset` entries
+      // in reverse-chrono order (newest first). front() is the Nth-last command
+      // the user asked for; back() was the OLDEST entry in the batch — wrong.
+      target_entry = recent.front();
       } else {
         target_entry.command = "No recent command found";
         target_entry.exit_code = 0;

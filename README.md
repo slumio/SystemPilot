@@ -4,12 +4,12 @@
 
 <div align="center">
 
-![Language](https://img.shields.io/badge/language-C%2B%2B17-blue?style=for-the-badge&logo=cplusplus)
+![Language](https://img.shields.io/badge/language-Rust%202021-orange?style=for-the-badge&logo=rust)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-orange?style=for-the-badge&logo=linux)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 ![Build](https://img.shields.io/badge/build-passing-brightgreen?style=for-the-badge)
 
-**mimalloc · simdjson · Intel TBB · Moodycamel · tsl::robin_map · AVX2 SIMD · spdlog · {fmt}**
+**Rust · Tokio · reqwest · DashMap · crossbeam-channel · mimalloc · Linux Netlink**
 
 </div>
 
@@ -34,7 +34,7 @@ SysPilot is a **systems-level diagnostic suite** for Linux that combines three t
 | **Zero-polling telemetry** | Netlink `cn_proc` events — kernel pushes process events instead of polling `/proc` |
 | **CausalTrace BFS** | Reverse-BFS multigraph traversal from symptom to root cause |
 | **AI diagnostics** | Gemini & Ollama integration with real-time streaming responses |
-| **Live TUI monitor** | Raw ANSI terminal UI — process list, anomaly highlighting, signal controls |
+| **Low-overhead live monitor** | 1 Hz `/proc` sampling and ANSI redraws; keyboard input remains responsive at 100 ms polling |
 | **eBPF tracing** | Optional `bpftrace` syscall tracing for open/connect/execve events |
 | **Vector codebase index** | AVX2 SIMD cosine similarity search maps causal graph nodes to source files |
 | **Terminal markdown** | Custom streaming ANSI renderer for bold, code blocks, and color |
@@ -48,44 +48,34 @@ SysPilot is a **systems-level diagnostic suite** for Linux that combines three t
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| `g++` or `clang++` | C++17 | Compiler |
-| `libmimalloc-dev` | ≥ 2.1 | Global heap allocator |
-| `libsimdjson-dev` | ≥ 3.6 | SIMD JSON parsing |
-| `libspdlog-dev` | ≥ 1.12 | Async structured logging |
-| `libfmt-dev` | ≥ 9.1 | Zero-alloc string formatting |
-| `libtbb-dev` | ≥ 2021.11 | Concurrent hash map |
-| `libcurl4` | any | HTTP for AI API calls |
+| Rust toolchain | stable, edition 2021 | Build and run SysPilot |
+| `rust-analyzer` | optional | IDE diagnostics and navigation |
+| Linux | required for daemon/telemetry | `/proc` and Netlink Process Connector |
 
-Install all on Ubuntu/Debian:
-```bash
-sudo apt-get install -y \
-  build-essential g++ \
-  libmimalloc-dev libsimdjson-dev \
-  libspdlog-dev libfmt-dev libtbb-dev \
-  libcurl4-openssl-dev
-```
+Install Rust with [rustup](https://rustup.rs/) if it is not already installed. `rust-analyzer` is detected automatically by editors that support it once the repository root (the directory containing `Cargo.toml`) is opened.
 
 ### Build
 
 ```bash
 git clone https://github.com/yourusername/syspilot.git
 cd syspilot
-chmod +x build.sh
-./build.sh
+./build_rust.sh
 ```
 
-The build script compiles with `-Ofast -flto -march=native` and links all HPC libraries. Expected output:
+Or use Cargo directly:
 
+```bash
+cargo build --release
 ```
-🛠️  Compiling SysPilot — High-Performance System Intelligence Suite
-     Libraries: mimalloc · simdjson · spdlog · fmt · TBB · tsl::robin_map · ConcurrentQueue
-✅  syspilot built — all HPC libraries linked.
-```
+
+The release binary is `./target/release/syspilot`. `build_rust.sh` opts into `target-cpu=native`; use the plain Cargo command when producing a binary to run on a different CPU.
+
+> The C++ sources and `xmake.lua` are retained as a legacy implementation. `./build.sh` builds that variant and requires Xmake plus its C++ dependencies; it is not the Rust build path.
 
 ### Install
 
 ```bash
-./syspilot install
+./target/release/syspilot install
 ```
 
 This creates `~/.syspilot/` with:
@@ -103,13 +93,13 @@ source ~/.syspilot/syspilot.sh
 
 ### Start the Daemon
 ```bash
-./syspilot daemon &
+./target/release/syspilot daemon &
 ```
-The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tree, and listens on `/tmp/syspilot.sock`. It has near-zero CPU usage — no polling.
+The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tree, and listens on `/tmp/syspilot.sock`. The monitor refreshes process data once per second to keep its overhead low; CPU use is workload- and system-dependent, so an absolute CPU ceiling cannot be guaranteed.
 
 ### Live TUI Monitor
 ```bash
-./syspilot monitor
+./target/release/syspilot monitor
 ```
 
 | Key | Action |
@@ -119,46 +109,48 @@ The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tre
 | `e` or `Enter` | AI root-cause explanation for selected process |
 | `s` | Send `SIGSTOP` (suspend) |
 | `r` | Send `SIGCONT` (resume) |
-| `k` | Send `SIGKILL` (terminate) |
+| `x` | Send `SIGKILL` (terminate) |
 | `q` | Quit |
 
 ### Explain Last Failed Command
 ```bash
-./syspilot explain
+./target/release/syspilot explain
 ```
 
 ### Causal Diagnostic by PID
 ```bash
 # Standard procfs snapshot
-./syspilot explain --pid 4582 --causal
+./target/release/syspilot explain --pid 4582 --causal
 
 # With eBPF syscall tracing (requires root or CAP_BPF)
-sudo ./syspilot explain --pid 4582 --causal --ebpf
+sudo ./target/release/syspilot explain --pid 4582 --causal --ebpf
 
 # With deep perf CPU profiling
-./syspilot explain --pid 4582 --causal --deep
+./target/release/syspilot explain --pid 4582 --causal --deep
 ```
 
 ### Ask a General Question
 ```bash
-./syspilot ask "why is vm.dirty_ratio causing write stalls under my workload?"
+./target/release/syspilot ask "why is vm.dirty_ratio causing write stalls under my workload?"
 ```
 
 ### Configure AI Provider
 ```bash
 # Gemini
-./syspilot config set-key gemini YOUR_API_KEY
+./target/release/syspilot config set-key gemini YOUR_API_KEY
 
 # Local Ollama
-./syspilot provider ollama
-./syspilot config set-url ollama http://localhost:11434
+./target/release/syspilot provider ollama
+./target/release/syspilot config set-url ollama http://localhost:11434
 ```
 
 ### Check Status / Uninstall
 ```bash
-./syspilot status
-./syspilot uninstall
+./target/release/syspilot status
+./target/release/syspilot uninstall
 ```
+
+For daemon heartbeat checks and automatic crash restart, see [Daemon Reliability](docs/RELIABILITY.md).
 
 ---
 

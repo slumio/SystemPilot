@@ -1,53 +1,34 @@
 #!/bin/bash
 set -e
 
-echo "🛠️  Compiling SysPilot — High-Performance System Intelligence Suite"
-echo "     Libraries: mimalloc · simdjson · spdlog · fmt · TBB · tsl::robin_map · ConcurrentQueue"
+echo "🛠  Building SysPilot via Xmake — High-Performance System Intelligence Suite"
+echo "     Libraries (xrepo): mimalloc · simdjson · spdlog · fmt · TBB · libcurl"
+echo "     Vendored headers: tsl::robin_map · ConcurrentQueue"
 
-# ── Compiler & Standard ─────────────────────────────────────────────────────
-CXX=${CXX:-g++}
-STD="-std=c++17"
+# Ensure local user path is searched for xmake/xrepo
+export PATH="$PATH:$HOME/.local/bin"
 
-# ── Optimization Flags ───────────────────────────────────────────────────────
-OPT="-Ofast -flto -march=native -fomit-frame-pointer -funroll-loops"
-OPT="$OPT -fno-plt -ffast-math"          # No PLT stubs; relaxed FP
-OPT="$OPT -DNDEBUG"                       # Strip all asserts
+if ! command -v xmake &> /dev/null; then
+    echo "❌ error: xmake command not found. Please install Xmake (https://xmake.io) first."
+    exit 1
+fi
 
-# ── Warning flags ────────────────────────────────────────────────────────────
-WARN="-Wall -Wextra -Wno-unused-parameter"
+# Configure release build
+xmake f -m release -y
 
-# ── Include paths ────────────────────────────────────────────────────────────
-INCLUDES="-Isrc -Isrc/vendor"
+# Build target
+xmake -y
 
-# ── Source files ─────────────────────────────────────────────────────────────
-SOURCES="
-  src/main.cpp
-  src/utils.cpp
-  src/safety.cpp
-  src/config.cpp
-  src/telemetry.cpp
-  src/profiler.cpp
-  src/codebase.cpp
-  src/causal_engine.cpp
-  src/ai.cpp
-  src/ui/streamer.cpp
-  src/ui/tui.cpp
-  src/daemon.cpp
-  src/install.cpp
-"
+# Extract generated target binary path and copy to project root
+TARGET_PATH=$(xmake show --format=json -t syspilot | grep '"targetfile":' | cut -d'"' -f4 | sed 's/\\//g')
+if [ -f "$TARGET_PATH" ]; then
+    cp "$TARGET_PATH" ./syspilot
+    echo "✅  syspilot built successfully and copied to root directory."
+else
+    echo "❌ error: Built target binary not found at '$TARGET_PATH'"
+    exit 1
+fi
 
-# ── Link libraries ───────────────────────────────────────────────────────────
-LIBS="-pthread"
-LIBS="$LIBS -lmimalloc"          # Microsoft mimalloc — global allocator
-LIBS="$LIBS -lsimdjson"          # SIMD-accelerated JSON (AVX2/SSE4)
-LIBS="$LIBS -lspdlog -lfmt"      # spdlog (async logging) + {fmt}
-LIBS="$LIBS -ltbb"               # Intel oneTBB (concurrent_hash_map)
-LIBS="$LIBS /lib/x86_64-linux-gnu/libcurl.so.4"   # HTTP for AI API
-
-# ── Build ─────────────────────────────────────────────────────────────────────
-$CXX $STD $OPT $WARN $INCLUDES $SOURCES -o syspilot $LIBS
-
-echo "✅  syspilot built — all HPC libraries linked."
 echo ""
 echo "  Run:  ./syspilot daemon &   # start background telemetry daemon"
 echo "        ./syspilot monitor    # launch live TUI"

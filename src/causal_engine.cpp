@@ -51,7 +51,8 @@ static std::string query_daemon() {
   addr.sun_family = AF_UNIX;
   std::strncpy(addr.sun_path, "/tmp/syspilot.sock", sizeof(addr.sun_path) - 1);
   
-  struct timeval tv = {0, 50000}; // 50ms timeout
+  struct timeval tv = {0, 500000}; // FIX #18: was 50ms — too tight on busy systems (500+ procs).
+                                   // 500ms gives the daemon time to serialise a large tree.
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -365,6 +366,9 @@ void CausalGraph::build_graph(int interval_seconds, bool use_ebpf,
         telemetry::get_open_resources(pid);
     std::unordered_set<std::string> mapped_resources;
 
+    // FIX #6: Track pending resource_ids so we don't add the same node twice
+    // when two different processes share the same open FD path in this scan pass.
+    std::unordered_set<std::string> pending_resource_ids;
     for (const auto &res : open_res) {
       std::string path = res.second;
       std::string resource_id = "";
@@ -388,8 +392,9 @@ void CausalGraph::build_graph(int interval_seconds, bool use_ebpf,
           mapped_resources.find(resource_id) == mapped_resources.end()) {
         mapped_resources.insert(resource_id);
 
-        // Add resource node if not present
-        if (nodes.find(resource_id) == nodes.end()) {
+        // Add resource node if not present in nodes OR already pending
+        if (nodes.find(resource_id) == nodes.end() &&
+            pending_resource_ids.insert(resource_id).second) {
           GraphNode rnode;
           rnode.id = resource_id;
           rnode.type = NodeType::RESOURCE;

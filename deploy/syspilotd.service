@@ -1,0 +1,14 @@
+[Unit]
+Description=SysPilot process telemetry daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/syspilot daemon
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

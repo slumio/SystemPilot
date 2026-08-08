@@ -39,6 +39,12 @@ static std::vector<std::string> read_thread_stack(pid_t pid, pid_t tid) {
                 frames.push_back(utils::trim(line));
             }
         }
+    } else {
+        // FIX (low): Reading /proc/<pid>/stack requires CAP_SYS_ADMIN or
+        // CAP_PTRACE. Silently returning an empty vector makes the caller think
+        // there are no stacks — emit a warning so the user understands why.
+        std::cerr << "\u26a0\ufe0f  [profiler] Cannot read kernel stack for TID "
+                  << tid << " (requires CAP_SYS_ADMIN / run with sudo)\n";
     }
     return frames;
 }
@@ -96,15 +102,23 @@ ProfileReport profile_process(pid_t pid, bool run_perf) {
         if (exit_code == 0) {
             report.perf_available = true;
             
+            // FIX #7: Write perf.data to /tmp with a PID-stamped name so we
+            // never pollute the CWD (which may be read-only or a project dir).
+            std::string perf_data_path = "/tmp/syspilot_perf_" + pid_str + ".data";
+            
             // Run perf record for 1.5 seconds
-            std::string perf_record_cmd = "perf record -F 99 -g -p " + pid_str + " -- sleep 1.5";
+            std::string perf_record_cmd = "perf record -F 99 -g -o " + perf_data_path
+                                          + " -p " + pid_str + " -- sleep 1.5";
             utils::run_command_output(perf_record_cmd);
             
-            // Generate report
-            std::string perf_report_cmd = "perf report --stdio --no-children --max-stack 12";
+            // Generate report from the explicit output file
+            std::string perf_report_cmd = "perf report -i " + perf_data_path
+                                          + " --stdio --no-children --max-stack 12";
             std::string perf_report = utils::run_command_output(perf_report_cmd);
             
-            // Clean up perf.data
+            // Clean up — always remove from /tmp, not CWD
+            utils::delete_file(perf_data_path);
+            // Also remove any stale perf.data in CWD left by prior versions
             utils::delete_file("perf.data");
             
             if (!perf_report.empty()) {
