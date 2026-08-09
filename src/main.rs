@@ -106,7 +106,13 @@ fn print_help() {
         "🤖 SysPilot: Operating System Reasoning Agent (Rust Edition)\n\n\
         Usage: syspilot <command> [options]\n\n\
         Commands:\n\
-          install                       Install terminal hooks and configuration\n\
+          setup                         Guided first-run setup
+\
+          install                       Create local configuration and shell hook
+\
+          install --binary [--force]    Copy this binary to ~/.local/bin
+\
+          uninstall --binary            Remove only the user-local binary\n\
           uninstall                     Remove terminal hooks\n\
           status                        Check integration status\n\
           daemon                        Start the background SysPilot netlink daemon\n\
@@ -168,11 +174,24 @@ fn main() {
     let cmd = args[1].as_str();
 
     match cmd {
+        "setup" => {
+            install::setup();
+        }
         "install" => {
-            install::install();
+            let binary = args.iter().any(|arg| arg == "--binary");
+            let force = args.iter().any(|arg| arg == "--force");
+            if binary {
+                install::install_user_binary(force);
+            } else {
+                install::install();
+            }
         }
         "uninstall" => {
-            install::uninstall();
+            if args.iter().any(|arg| arg == "--binary") {
+                install::remove_user_binary();
+            } else {
+                install::uninstall();
+            }
         }
         "status" => {
             install::status();

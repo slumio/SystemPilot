@@ -51,30 +51,54 @@ This document describes the behavior implemented in this repository. It does not
 | `perf` | Deep profiling where supported | Profile data can be limited or unavailable. |
 | systemd | Service management | Use the provided unit only on systemd hosts. |
 
-## Build and first run
+## Install and first run
+
+### Recommended: install with Cargo
 
 ```bash
 git clone https://github.com/your-org/syspilot.git
 cd syspilot
-cargo build --release
-./target/release/syspilot --help
+cargo install --path .
+syspilot setup
 ```
 
-`./build_rust.sh` is an alternative local release build helper. It enables `target-cpu=native`; use `cargo build --release` for a binary intended for a different CPU.
+`setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
 
-### Install shell integration
+### Build from source instead
 
 ```bash
-./target/release/syspilot install
+cargo build --release
+./target/release/syspilot setup
+```
+
+Use `cargo build --release` for a portable binary. `./build_rust.sh` is an alternative local build helper that enables `target-cpu=native`.
+
+### Individual installation actions
+
+```bash
+# Create configuration, logs, and the Bash hook only
+syspilot install
+
+# Copy the running binary to ~/.local/bin without overwriting an existing copy
+syspilot install --binary
+
+# Replace an existing user-local copy
+syspilot install --binary --force
+
+# Remove only the user-local copy
+syspilot uninstall --binary
+```
+
+To enable shell command capture, add this line to your Bash profile, then open a new terminal:
+
+```bash
 source ~/.syspilot/syspilot.sh
 ```
 
-The install command creates `~/.syspilot/config.json` and `~/.syspilot/syspilot.sh`. Source the shell script from `~/.bashrc` or `~/.zshrc` to capture command history for `syspilot explain` without a PID.
-
-Check the installation:
+Check the installation and next actions:
 
 ```bash
-./target/release/syspilot status
+syspilot status
 ```
 
 ## AI setup

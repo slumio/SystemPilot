@@ -1,5 +1,8 @@
 use crate::config;
 use std::fs;
+use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 const HEALTH_PATH: &str = "/tmp/syspilot-health.json";
@@ -27,87 +30,232 @@ PROMPT_COMMAND="__syspilot_precmd; $PROMPT_COMMAND"
 trap '__syspilot_preexec "$BASH_COMMAND"' DEBUG
 "#;
 
-pub fn install() -> bool {
-    let dir = config::get_syspilot_dir();
-    if let Err(e) = fs::create_dir_all(&dir) {
-        eprintln!("❌ Could not create {}: {}", dir.display(), e);
-        return false;
-    }
+pub fn user_binary_path() -> Result<PathBuf, String> {
+    let home =
+        dirs::home_dir().ok_or_else(|| "could not determine your home directory".to_string())?;
+    Ok(home.join(".local").join("bin").join("syspilot"))
+}
 
-    // Create log files if missing
-    for name in &["session.log", "context.log", "command_start.log"] {
-        let p = dir.join(name);
-        if !p.exists() {
-            let _ = fs::write(&p, "");
+pub fn install_user_binary(force: bool) -> bool {
+    let destination = match user_binary_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
+    if destination.exists() && !force {
+        println!(
+            "⚠️  {} already exists. Run `syspilot install --binary --force` to replace it.",
+            destination.display()
+        );
+        return true;
+    }
+    let source = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("❌ Could not locate the running binary: {error}");
+            return false;
+        }
+    };
+    if let Some(parent) = destination.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!("❌ Could not create {}: {error}", parent.display());
+            return false;
         }
     }
-
-    // Create default config if missing
-    let cfg_path = dir.join("config.json");
-    if !cfg_path.exists() {
-        let _ = config::save(&config::Config::default());
-    }
-
-    // Write the shell hook
-    let hook_path = dir.join("syspilot.sh");
-    if let Err(e) = fs::write(&hook_path, HOOK_CONTENT) {
+    if let Err(error) = fs::copy(&source, &destination) {
         eprintln!(
-            "❌ Failed to write hook script to {}: {}",
-            hook_path.display(),
-            e
+            "❌ Could not copy binary to {}: {error}",
+            destination.display()
         );
         return false;
     }
+    if let Err(error) = fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)) {
+        eprintln!("❌ Could not set executable permissions: {error}");
+        return false;
+    }
+    println!("✅ Installed binary at {}", destination.display());
+    let bin_dir = destination
+        .parent()
+        .expect("binary destination has a parent");
+    if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|entry| entry == bin_dir)
+    {
+        println!("Add this to your shell profile, then open a new terminal:");
+        println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
+    }
+    true
+}
 
-    println!("✅ SysPilot installed successfully.");
-    println!("Hook script created at: {}", hook_path.display());
-    println!("\nTo enable SysPilot, add this line to your ~/.bashrc:");
+pub fn remove_user_binary() -> bool {
+    let destination = match user_binary_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            return false;
+        }
+    };
+    if !destination.exists() {
+        println!(
+            "No user-local SysPilot binary found at {}.",
+            destination.display()
+        );
+        return true;
+    }
+    match fs::remove_file(&destination) {
+        Ok(()) => {
+            println!("Removed {}", destination.display());
+            true
+        }
+        Err(error) => {
+            eprintln!("❌ Could not remove {}: {error}", destination.display());
+            false
+        }
+    }
+}
+
+pub fn install() -> bool {
+    let dir = config::get_syspilot_dir();
+    if let Err(error) = fs::create_dir_all(&dir) {
+        eprintln!("❌ Could not create {}: {error}", dir.display());
+        return false;
+    }
+    for name in ["session.log", "context.log", "command_start.log"] {
+        let path = dir.join(name);
+        if !path.exists() && fs::write(&path, "").is_err() {
+            eprintln!("❌ Could not create {}", path.display());
+            return false;
+        }
+    }
+    let config_path = dir.join("config.json");
+    if !config_path.exists() {
+        if let Err(error) = config::save(&config::Config::default()) {
+            eprintln!("❌ Could not create default configuration: {error}");
+            return false;
+        }
+    }
+    let hook_path = dir.join("syspilot.sh");
+    if let Err(error) = fs::write(&hook_path, HOOK_CONTENT) {
+        eprintln!("❌ Could not write {}: {error}", hook_path.display());
+        return false;
+    }
+    println!("✅ SysPilot files are ready in {}", dir.display());
+    println!("To capture failed shell commands, add this one line to your Bash profile:");
     println!("  source {}", hook_path.display());
-    println!("\nThen restart your terminal or run: source ~/.bashrc");
+    println!("The profile is not edited automatically.");
+    println!("Optional: run `syspilot install --binary` to copy this binary to ~/.local/bin.");
+    true
+}
+
+pub fn setup() -> bool {
+    println!(
+        "Welcome to SysPilot setup. You can change every setting later with `syspilot config`."
+    );
+    if !install() {
+        return false;
+    }
+    let _ = install_user_binary(false);
+    println!("\nChoose AI setup: [1] Gemini  [2] Ollama  [3] Skip for now");
+    print!("Choice [3]: ");
+    let _ = io::stdout().flush();
+    let mut choice = String::new();
+    let _ = io::stdin().read_line(&mut choice);
+    let mut cfg = match config::load_checked() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("❌ Could not load configuration: {error}");
+            return false;
+        }
+    };
+    match choice.trim() {
+        "1" => { print!("Gemini API key: "); let _ = io::stdout().flush(); let mut key = String::new(); let _ = io::stdin().read_line(&mut key); if key.trim().is_empty() { println!("No key entered. Gemini was not configured."); } else { cfg.active_provider = "gemini".to_string(); cfg.gemini_api_key = key.trim().to_string(); } }
+        "2" => { cfg.active_provider = "ollama".to_string(); print!("Ollama URL [{}]: ", cfg.ollama_url); let _ = io::stdout().flush(); let mut url = String::new(); let _ = io::stdin().read_line(&mut url); if !url.trim().is_empty() { cfg.ollama_url = url.trim().to_string(); } }
+        _ => println!("AI setup skipped. Configure it later with `syspilot provider` and `syspilot config set-key`."),
+    }
+    if let Err(error) = config::save(&cfg) {
+        eprintln!("❌ Could not save configuration: {error}");
+        return false;
+    }
+    println!("\nNext steps:");
+    println!("  1. source ~/.syspilot/syspilot.sh");
+    println!("  2. syspilot status");
+    println!("  3. syspilot explain --pid $$");
+    println!("  4. syspilot --help");
     true
 }
 
 pub fn uninstall() -> bool {
-    let dir = config::get_syspilot_dir();
-    let hook_path = dir.join("syspilot.sh");
+    let hook_path = config::get_syspilot_dir().join("syspilot.sh");
     if hook_path.exists() {
-        let _ = fs::remove_file(&hook_path);
+        if let Err(error) = fs::remove_file(&hook_path) {
+            eprintln!("❌ Could not remove {}: {error}", hook_path.display());
+            return false;
+        }
         println!("Removed hook script: {}", hook_path.display());
     }
     println!(
-        "To completely remove SysPilot, delete the directory: {}",
-        dir.display()
+        "Your logs and configuration remain in {}.",
+        config::get_syspilot_dir().display()
     );
-    println!("Also remember to remove the 'source' line from your ~/.bashrc.");
+    println!("Remove the source line from your shell profile. Use `syspilot uninstall --binary` to remove only the user-local binary.");
     true
 }
 
 pub fn status() -> bool {
     let dir = config::get_syspilot_dir();
-    let hook_path = dir.join("syspilot.sh");
-    if hook_path.exists() {
-        println!("✅ Hook script found: {}", hook_path.display());
-        if std::env::var("SYSPILOT_HOOK_LOADED").is_ok() {
-            println!("✅ Hook is active in this shell.");
+    println!("SysPilot home: {}", dir.display());
+    let hook = dir.join("syspilot.sh");
+    println!(
+        "{} shell hook: {}",
+        if hook.exists() { "✅" } else { "⚠️" },
+        if hook.exists() {
+            "installed"
         } else {
-            println!("⚠️  Hook is not active in the current shell environment.");
-            println!("Did you run `source ~/.syspilot/syspilot.sh` or add it to ~/.bashrc?");
+            "not installed; run `syspilot install`"
         }
-    } else {
-        println!("❌ SysPilot is not installed. Run `syspilot install` first.");
+    );
+    println!(
+        "{} shell hook in this process",
+        if std::env::var("SYSPILOT_HOOK_LOADED").is_ok() {
+            "✅ active"
+        } else {
+            "⚠️ not active; run `source ~/.syspilot/syspilot.sh`"
+        }
+    );
+    match user_binary_path() {
+        Ok(path) if path.exists() => println!("✅ User-local binary: {}", path.display()),
+        Ok(path) => println!("ℹ️  User-local binary not installed at {}", path.display()),
+        Err(error) => println!("⚠️  {error}"),
+    }
+    match config::load_checked() {
+        Ok(cfg) => {
+            println!("✅ AI provider: {}", cfg.active_provider);
+            println!(
+                "{} Distributed telemetry",
+                if cfg.distributed_telemetry.enabled {
+                    "✅ enabled"
+                } else {
+                    "ℹ️  disabled"
+                }
+            );
+        }
+        Err(error) => println!("❌ Configuration error: {error}"),
     }
     match fs::metadata(HEALTH_PATH).and_then(|meta| meta.modified()) {
         Ok(modified) => match SystemTime::now().duration_since(modified) {
             Ok(age) if age <= Duration::from_secs(3) => {
-                println!("✅ Daemon heartbeat is fresh ({} ms ago).", age.as_millis());
+                println!("✅ Daemon heartbeat: fresh ({} ms ago)", age.as_millis())
             }
             Ok(age) => println!(
-                "❌ Daemon heartbeat is stale ({} seconds ago). Check systemd or restart the daemon.",
+                "⚠️  Daemon heartbeat: stale ({} seconds ago)",
                 age.as_secs()
             ),
-            Err(_) => println!("⚠️  Daemon heartbeat timestamp is in the future."),
+            Err(_) => println!("⚠️  Daemon heartbeat timestamp is in the future"),
         },
-        Err(_) => println!("❌ No daemon heartbeat found. Start `syspilot daemon &` or use systemd."),
+        Err(_) => println!(
+            "ℹ️  Daemon: not running. Start with `syspilot daemon` or install the systemd unit."
+        ),
     }
     true
 }
