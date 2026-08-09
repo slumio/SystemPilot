@@ -310,7 +310,7 @@ impl CausalGraph {
                         .unwrap_or(0),
                 );
 
-            let mut dev = GraphNode {
+            let dev = GraphNode {
                 id: format!("resource:/dev/{}", dev_name),
                 node_type: NodeType::Resource,
                 name: format!("/dev/{}", dev_name),

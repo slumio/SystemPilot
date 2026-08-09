@@ -1,3 +1,7 @@
+> **Historical documentation notice**
+>
+> This document describes the retired C++ implementation. It is retained for historical reference only. It is not valid for the current Rust application. Use the current [documentation index](../README.md), [project README](../../README.md), and [architecture guide](../../ARCHITECTURE.md) for build, configuration, deployment, and behavior.
+
 # SysPilot Master Systems Engineering Textbook
 
 # VOLUME 1: LINUX KERNEL INTERNALS, TRACING MECHANICS & eBPF CO-RE SUBSYSTEM

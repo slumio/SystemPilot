@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use syspilot::distributed::{
-    ExportPolicy, TelemetryEnvelope, TelemetryKind, TELEMETRY_SCHEMA_VERSION,
+    DistributedTelemetryConfig, ExportPolicy, ProcessAlertEngine, ProcessAlertRule,
+    ProcessNameMatch, TelemetryEnvelope, TelemetryKind, TELEMETRY_SCHEMA_VERSION,
 };
 
 fn envelope() -> TelemetryEnvelope {
     TelemetryEnvelope {
         schema_version: TELEMETRY_SCHEMA_VERSION,
-        message_id: "a3a0cf2d-9197-47ef-a4b3-4b49ea525ca1".into(),
+        message_id: "node-a-1".into(),
         node_id: "node-a".into(),
         sequence: 42,
         observed_at_unix_nanos: 1_700_000_000_000_000_000,
@@ -34,10 +35,44 @@ fn envelope_rejects_unknown_schema() {
 }
 
 #[test]
-fn export_policy_rejects_unboundedly_small_queue() {
+fn export_policy_requires_queue_capacity_for_a_batch() {
     let policy = ExportPolicy {
-        max_queue_bytes: 10,
+        max_queue_messages: 10,
+        batch_size: 11,
         ..Default::default()
     };
     assert!(policy.validate().is_err());
+}
+
+#[test]
+fn enabled_export_requires_endpoint_and_node_identity() {
+    let config = DistributedTelemetryConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn exact_and_prefix_process_rules_are_evaluated() {
+    let engine = ProcessAlertEngine::new(vec![
+        ProcessAlertRule {
+            id: "postgres".into(),
+            process_name: "postgres".into(),
+            match_type: ProcessNameMatch::Exact,
+            enabled: true,
+            labels: BTreeMap::new(),
+        },
+        ProcessAlertRule {
+            id: "api".into(),
+            process_name: "api-".into(),
+            match_type: ProcessNameMatch::Prefix,
+            enabled: true,
+            labels: BTreeMap::new(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(engine.evaluate("postgres", 10, 1, "EXEC", 1).len(), 1);
+    assert_eq!(engine.evaluate("api-worker", 11, 1, "EXEC", 1).len(), 1);
+    assert!(engine.evaluate("redis", 12, 1, "EXEC", 1).is_empty());
 }

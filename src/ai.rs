@@ -69,7 +69,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                 eprintln!("❌ SysPilot API key is not set. Run `syspilot config set-key syspilot YOUR_KEY`");
                 return false;
             }
-            let url = "https://api.syspilot.dev/v1/chat/completions".to_string();
+            let url = config.syspilot_url.clone();
             let headers = vec![format!("Authorization: Bearer {}", config.syspilot_api_key)];
             let payload = serde_json::json!({
                 "model": config.syspilot_model,
@@ -91,14 +91,15 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
     // Build curl args — no shell injection, all args passed directly to execvp
     let mut curl_args: Vec<String> = vec![
         "curl".into(),
-        "-s".into(),
+        "-sS".into(),
+        "--fail-with-body".into(),
         "-N".into(),
         "-X".into(),
         "POST".into(),
         "--max-time".into(),
-        "120".into(),
+        config.ai_request_timeout_seconds.to_string(),
         "--connect-timeout".into(),
-        "15".into(),
+        config.ai_connect_timeout_seconds.to_string(),
         "-H".into(),
         "Content-Type: application/json".into(),
     ];
@@ -115,6 +116,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
     // run_command_secure_stream on the current thread.
     let streamer_cell = std::cell::UnsafeCell::new(streamer);
     let done_cell = std::cell::Cell::new(false);
+    let received_content = std::cell::Cell::new(false);
     let mut line_buffer2 = String::new();
     let provider2 = config.active_provider.clone();
 
@@ -146,6 +148,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                                         if let Some(parts) = c["content"]["parts"].as_array() {
                                             for p in parts {
                                                 if let Some(text) = p["text"].as_str() {
+                                                    received_content.set(true);
                                                     s.print(text);
                                                 }
                                             }
@@ -158,6 +161,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                     "ollama" => {
                         if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
                             if let Some(text) = j["message"]["content"].as_str() {
+                                received_content.set(true);
                                 s.print(text);
                             }
                         }
@@ -173,6 +177,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                                 if let Some(choices) = j["choices"].as_array() {
                                     for ch in choices {
                                         if let Some(text) = ch["delta"]["content"].as_str() {
+                                            received_content.set(true);
                                             s.print(text);
                                         }
                                     }
@@ -193,7 +198,11 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
     println!();
 
     if !ok || code != 0 {
-        eprintln!("❌ curl failed with exit code: {}", code);
+        eprintln!("❌ AI provider request failed with exit code: {}", code);
+        return false;
+    }
+    if !received_content.get() {
+        eprintln!("❌ AI provider returned no usable streamed content.");
         return false;
     }
 

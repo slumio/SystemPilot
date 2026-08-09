@@ -116,6 +116,8 @@ fn print_help() {
           model <name>                  Set active model name\n\
           pull <model> [--set-active]   Pull a model using Ollama\n\
           index [--force]               Index current codebase for vector search\n\
+          config telemetry enable <endpoint> <node-id> [token]  Configure distributed export\n\
+          config alert add <id> <exact|prefix> <process-name>  Add process alert\n\
           config <action>               Manage settings\n\
              set-key <provider> <key>   Set provider API key\n\
              set-url <provider> <url>   Set provider API endpoint URL\n\
@@ -176,7 +178,7 @@ fn main() {
             install::status();
         }
         "daemon" => {
-            std::process::exit(daemon::run_daemon());
+            std::process::exit(daemon::run_daemon(conf));
         }
         "events" => match request_daemon_events() {
             Ok(events) => match serde_json::from_str::<serde_json::Value>(&events) {
@@ -261,10 +263,117 @@ fn main() {
         }
         "config" => {
             if args.len() < 3 {
-                eprintln!("❌ Expected config action (set-key, set-url, set)");
+                eprintln!("❌ Expected config action (telemetry, alert, set-key, set-url, set)");
                 std::process::exit(1);
             }
             match args[2].as_str() {
+                "telemetry" => {
+                    let action = args.get(3).map(String::as_str).unwrap_or("show");
+                    match action {
+                        "enable" => {
+                            if args.len() < 6 {
+                                eprintln!("❌ Usage: syspilot config telemetry enable <endpoint> <node-id> [bearer-token]");
+                                std::process::exit(1);
+                            }
+                            conf.distributed_telemetry.enabled = true;
+                            conf.distributed_telemetry.endpoint = args[4].clone();
+                            conf.distributed_telemetry.node_id = args[5].clone();
+                            conf.distributed_telemetry.bearer_token =
+                                args.get(6).cloned().unwrap_or_default();
+                            save_config_or_exit(&conf);
+                            println!(
+                                "✅ Distributed telemetry enabled for node {}",
+                                conf.distributed_telemetry.node_id
+                            );
+                        }
+                        "disable" => {
+                            conf.distributed_telemetry.enabled = false;
+                            save_config_or_exit(&conf);
+                            println!("✅ Distributed telemetry disabled");
+                        }
+                        "show" => {
+                            let mut view = conf.distributed_telemetry.clone();
+                            if !view.bearer_token.is_empty() {
+                                view.bearer_token = "[configured]".to_string();
+                            }
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&view).unwrap_or_default()
+                            );
+                        }
+                        _ => {
+                            eprintln!("❌ Usage: syspilot config telemetry <enable|disable|show>");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "alert" => {
+                    let action = args.get(3).map(String::as_str).unwrap_or("list");
+                    match action {
+                        "add" => {
+                            if args.len() < 7 {
+                                eprintln!("❌ Usage: syspilot config alert add <id> <exact|prefix> <process-name>");
+                                std::process::exit(1);
+                            }
+                            let match_type = match args[5].as_str() {
+                                "exact" => distributed::ProcessNameMatch::Exact,
+                                "prefix" => distributed::ProcessNameMatch::Prefix,
+                                _ => {
+                                    eprintln!("❌ Match type must be exact or prefix");
+                                    std::process::exit(1);
+                                }
+                            };
+                            let id = args[4].clone();
+                            if conf
+                                .distributed_telemetry
+                                .process_alert_rules
+                                .iter()
+                                .any(|rule| rule.id == id)
+                            {
+                                eprintln!("❌ Alert rule {} already exists", id);
+                                std::process::exit(1);
+                            }
+                            conf.distributed_telemetry.process_alert_rules.push(
+                                distributed::ProcessAlertRule {
+                                    id,
+                                    process_name: args[6].clone(),
+                                    match_type,
+                                    enabled: true,
+                                    labels: std::collections::BTreeMap::new(),
+                                },
+                            );
+                            save_config_or_exit(&conf);
+                            println!("✅ Process alert rule added");
+                        }
+                        "remove" => {
+                            let Some(id) = args.get(4) else {
+                                eprintln!("❌ Usage: syspilot config alert remove <id>");
+                                std::process::exit(1);
+                            };
+                            let before = conf.distributed_telemetry.process_alert_rules.len();
+                            conf.distributed_telemetry
+                                .process_alert_rules
+                                .retain(|rule| rule.id != *id);
+                            if before == conf.distributed_telemetry.process_alert_rules.len() {
+                                eprintln!("❌ Alert rule {} not found", id);
+                                std::process::exit(1);
+                            }
+                            save_config_or_exit(&conf);
+                            println!("✅ Process alert rule removed");
+                        }
+                        "list" => println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &conf.distributed_telemetry.process_alert_rules
+                            )
+                            .unwrap_or_default()
+                        ),
+                        _ => {
+                            eprintln!("❌ Usage: syspilot config alert <add|remove|list>");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 "set-key" => {
                     if args.len() < 5 {
                         eprintln!("❌ Usage: syspilot config set-key <provider> <key>");
@@ -589,6 +698,16 @@ fn main() {
                 ctx["analysis_type"] = serde_json::json!("command_failure_diagnostics");
             }
 
+            if !conf.distributed_telemetry.process_alert_rules.is_empty() {
+                ctx["configured_process_alert_rules"] =
+                    serde_json::to_value(&conf.distributed_telemetry.process_alert_rules)
+                        .unwrap_or_default();
+                if let Ok(events) = request_daemon_events() {
+                    ctx["recent_lifecycle_events"] = serde_json::from_str(&events)
+                        .unwrap_or_else(|_| serde_json::json!({"raw": events}));
+                }
+            }
+
             let prompt = if causal {
                 format!(
                     "You are a senior system reliability engineer performing root-cause analysis.\n\
@@ -600,13 +719,13 @@ fn main() {
                     2. Step-by-step root cause chain\n\
                     3. Which process is the root cause and why\n\
                     4. Recommended actionable mitigation\n\
-                    Be extremely specific. Provide a Confidence Score (0-100%).",
+                    Be extremely specific. Separate observed evidence from inference, identify missing evidence and alternative hypotheses, and provide a Confidence Score (0-100%). Do not claim a root cause when the evidence only supports correlation.",
                     serde_json::to_string_pretty(&ctx).unwrap_or_default()
                 )
             } else {
                 format!(
                     "Perform causal reasoning on the following OS telemetry and execution context to diagnose the system state.\n\n\
-                    OS Telemetry and Context:\n{}",
+                    OS Telemetry and Context:\n{}\n\nStructure the response as: observed evidence, causal hypothesis, competing explanations, confidence, and safe remediation steps. Do not present inference as fact.",
                     serde_json::to_string_pretty(&ctx).unwrap_or_default()
                 )
             };

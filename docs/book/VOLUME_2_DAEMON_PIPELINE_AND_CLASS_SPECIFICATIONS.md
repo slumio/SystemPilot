@@ -1,3 +1,7 @@
+> **Historical documentation notice**
+>
+> This document describes the retired C++ implementation. It is retained for historical reference only. It is not valid for the current Rust application. Use the current [documentation index](../README.md), [project README](../../README.md), and [architecture guide](../../ARCHITECTURE.md) for build, configuration, deployment, and behavior.
+
 # SysPilot Master Architecture Specification: Volume 2
 ## Edge Daemon Architecture, Processing Pipeline & C++ Class Catalog
 

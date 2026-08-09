@@ -1,3 +1,7 @@
+> **Historical documentation notice**
+>
+> This document is retained as historical design reference. It is not valid for the current Rust application. Use the current [documentation index](../README.md), [project README](../../README.md), and [architecture guide](../../ARCHITECTURE.md) for build, configuration, deployment, and behavior.
+
 # VOLUME 1: LINUX KERNEL INTERNALS, TRACING MECHANICS & eBPF CO-RE SUBSYSTEM
 
 ---

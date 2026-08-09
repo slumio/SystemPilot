@@ -1,3 +1,7 @@
+> **Historical documentation notice**
+>
+> This document is retained as historical design reference. It is not valid for the current Rust application. Use the current [documentation index](../README.md), [project README](../../README.md), and [architecture guide](../../ARCHITECTURE.md) for build, configuration, deployment, and behavior.
+
 # Distributed Telemetry Layout
 
 This is the staged design for distributed telemetry. The current repository implements the local daemon and the shared message contract in `src/distributed.rs`; collectors, durable queues, and network exporters are planned work and are not enabled by default.

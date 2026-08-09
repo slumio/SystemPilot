@@ -10,7 +10,7 @@ echo "=================================================="
 
 # Ensure project is compiled
 echo "🛠️  Compiling SysPilot..."
-./build.sh > /dev/null
+./build_rust.sh > /dev/null
 echo "✓ Compilation successful."
 
 # Clean up previous run
@@ -88,11 +88,11 @@ echo "   Shared resource: /tmp/syspilot_shared.log"
 echo "=================================================="
 echo ""
 echo "🔍 Running SysPilot CausalTrace diagnostics..."
-echo "Command: ./syspilot explain --pid $DB_PID --causal --no-index"
+echo "Command: ./target/release/syspilot explain --pid $DB_PID --causal --no-index"
 echo ""
 
 # Run SysPilot explain
-./syspilot explain --pid $DB_PID --causal --no-index
+./target/release/syspilot explain --pid $DB_PID --causal --no-index
 
 echo ""
 echo "=================================================="

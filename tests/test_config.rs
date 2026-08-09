@@ -42,6 +42,10 @@ fn config_serialises_and_deserialises() {
         ollama_model: "llama3".to_string(),
         embedding_model: "text-embedding-004".to_string(),
         chunk_strategy: "line".to_string(),
+        ai_request_timeout_seconds: 120,
+        ai_connect_timeout_seconds: 15,
+        syspilot_url: "https://api.syspilot.dev/v1/chat/completions".to_string(),
+        distributed_telemetry: Default::default(),
     };
 
     let json = serde_json::to_string_pretty(&original).unwrap();

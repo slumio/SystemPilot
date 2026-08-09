@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;

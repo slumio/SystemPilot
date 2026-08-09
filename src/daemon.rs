@@ -3,6 +3,7 @@
 /// Subscribes to Linux Netlink Process Connector (cn_proc) for zero-polling
 /// process lifecycle events. Serves process tree and event data over a UNIX
 /// socket at /tmp/syspilot.sock.
+use crate::distributed::{ProcessAlertEngine, TelemetryKind, TelemetryPublisher};
 use dashmap::DashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,7 +23,7 @@ struct ProcessNode {
     state: char,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct ProcessEvent {
     timestamp_ns: u64,
     event_type: String, // "FORK", "EXEC", "EXIT"
@@ -135,6 +136,8 @@ fn netlink_listener(
     tree: Arc<DashMap<i32, ProcessNode>>,
     events: Arc<crossbeam_channel::Sender<ProcessEvent>>,
     running: Arc<AtomicBool>,
+    publisher: Arc<TelemetryPublisher>,
+    alerts: Arc<ProcessAlertEngine>,
 ) {
     use libc::*;
 
@@ -275,7 +278,7 @@ fn netlink_listener(
                                         state: 'S',
                                     },
                                 );
-                                let _ = events.try_send(ProcessEvent {
+                                let event = ProcessEvent {
                                     timestamp_ns: now_ns(),
                                     event_type: "FORK".to_string(),
                                     pid: child,
@@ -284,7 +287,8 @@ fn netlink_listener(
                                     exit_status: None,
                                     parent_exit_signal: None,
                                     exit_reason: None,
-                                });
+                                };
+                                record_event(&events, &publisher, &alerts, event);
                             }
                         }
                         2 => {
@@ -304,7 +308,7 @@ fn netlink_listener(
                                         name: name.clone(),
                                         state: 'S',
                                     });
-                                let _ = events.try_send(ProcessEvent {
+                                let event = ProcessEvent {
                                     timestamp_ns: now_ns(),
                                     event_type: "EXEC".to_string(),
                                     pid,
@@ -313,7 +317,8 @@ fn netlink_listener(
                                     exit_status: None,
                                     parent_exit_signal: None,
                                     exit_reason: None,
-                                });
+                                };
+                                record_event(&events, &publisher, &alerts, event);
                             }
                         }
                         4 => {
@@ -338,7 +343,7 @@ fn netlink_listener(
                                     .remove(&pid)
                                     .map(|(_, process)| process.name)
                                     .unwrap_or_default();
-                                let _ = events.try_send(ProcessEvent {
+                                let event = ProcessEvent {
                                     timestamp_ns: now_ns(),
                                     event_type: "EXIT".to_string(),
                                     pid,
@@ -347,7 +352,8 @@ fn netlink_listener(
                                     exit_status: Some(exit_status),
                                     parent_exit_signal: Some(parent_exit_signal),
                                     exit_reason: Some(describe_exit_status(exit_status)),
-                                });
+                                };
+                                record_event(&events, &publisher, &alerts, event);
                             }
                         }
                         _ => {}
@@ -364,6 +370,27 @@ fn netlink_listener(
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
+
+fn record_event(
+    events: &crossbeam_channel::Sender<ProcessEvent>,
+    publisher: &TelemetryPublisher,
+    alerts: &ProcessAlertEngine,
+    event: ProcessEvent,
+) {
+    publisher.publish(TelemetryKind::ProcessLifecycle, &event);
+    for alert in alerts.evaluate(
+        &event.name,
+        event.pid,
+        event.ppid,
+        &event.event_type,
+        event.timestamp_ns,
+    ) {
+        publisher.publish(TelemetryKind::ProcessAlert, &alert);
+    }
+    if events.try_send(event).is_err() {
+        tracing::warn!("[daemon] lifecycle event queue is full; event was dropped");
+    }
+}
 
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -516,7 +543,22 @@ fn unix_socket_server(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn run_daemon() -> i32 {
+pub fn run_daemon(config: crate::config::Config) -> i32 {
+    let publisher = match TelemetryPublisher::from_config(&config.distributed_telemetry) {
+        Ok(publisher) => Arc::new(publisher),
+        Err(error) => {
+            eprintln!("❌ Invalid distributed telemetry configuration: {}", error);
+            return 2;
+        }
+    };
+    let alerts =
+        match ProcessAlertEngine::new(config.distributed_telemetry.process_alert_rules.clone()) {
+            Ok(alerts) => Arc::new(alerts),
+            Err(error) => {
+                eprintln!("❌ Invalid process alert rules: {}", error);
+                return 2;
+            }
+        };
     tracing_subscriber::fmt()
         .with_target(false)
         .with_thread_ids(false)
@@ -535,8 +577,10 @@ pub fn run_daemon() -> i32 {
 
     let tree_nl = Arc::clone(&tree);
     let run_nl = Arc::clone(&running);
+    let publisher_nl = Arc::clone(&publisher);
+    let alerts_nl = Arc::clone(&alerts);
     let nl_thread = std::thread::spawn(move || {
-        netlink_listener(tree_nl, Arc::new(tx), run_nl);
+        netlink_listener(tree_nl, Arc::new(tx), run_nl, publisher_nl, alerts_nl);
     });
 
     let tree_sock = Arc::clone(&tree);

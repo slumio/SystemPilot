@@ -1,3 +1,4 @@
+use crate::distributed::DistributedTelemetryConfig;
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -30,6 +31,18 @@ pub struct Config {
 
     #[serde(default = "default_chunk_strategy")]
     pub chunk_strategy: String,
+
+    #[serde(default = "default_ai_request_timeout_seconds")]
+    pub ai_request_timeout_seconds: u64,
+
+    #[serde(default = "default_ai_connect_timeout_seconds")]
+    pub ai_connect_timeout_seconds: u64,
+
+    #[serde(default = "default_syspilot_url")]
+    pub syspilot_url: String,
+
+    #[serde(default)]
+    pub distributed_telemetry: DistributedTelemetryConfig,
 }
 
 fn default_provider() -> String {
@@ -53,6 +66,15 @@ fn default_embedding_model() -> String {
 fn default_chunk_strategy() -> String {
     "syntactic".to_string()
 }
+fn default_ai_request_timeout_seconds() -> u64 {
+    120
+}
+fn default_ai_connect_timeout_seconds() -> u64 {
+    15
+}
+fn default_syspilot_url() -> String {
+    "https://api.syspilot.dev/v1/chat/completions".to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -66,6 +88,10 @@ impl Default for Config {
             ollama_model: default_ollama_model(),
             embedding_model: default_embedding_model(),
             chunk_strategy: default_chunk_strategy(),
+            ai_request_timeout_seconds: default_ai_request_timeout_seconds(),
+            ai_connect_timeout_seconds: default_ai_connect_timeout_seconds(),
+            syspilot_url: default_syspilot_url(),
+            distributed_telemetry: DistributedTelemetryConfig::default(),
         }
     }
 }
@@ -74,6 +100,20 @@ pub fn get_syspilot_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".syspilot")
+}
+
+pub fn validate(cfg: &Config) -> AppResult<()> {
+    cfg.distributed_telemetry.validate()?;
+    if cfg.ai_request_timeout_seconds == 0 || cfg.ai_connect_timeout_seconds == 0 {
+        return Err(AppError::Validation(
+            "AI request and connect timeouts must be greater than zero".into(),
+        ));
+    }
+    reqwest::Url::parse(&cfg.ollama_url)
+        .map_err(|error| AppError::Validation(format!("invalid Ollama URL: {error}")))?;
+    reqwest::Url::parse(&cfg.syspilot_url)
+        .map_err(|error| AppError::Validation(format!("invalid SysPilot API URL: {error}")))?;
+    Ok(())
 }
 
 pub fn load_checked() -> AppResult<Config> {
@@ -108,6 +148,8 @@ pub fn load_checked() -> AppResult<Config> {
     {
         cfg.gemini_model = default_gemini_model();
     }
+
+    validate(&cfg)?;
 
     Ok(cfg)
 }

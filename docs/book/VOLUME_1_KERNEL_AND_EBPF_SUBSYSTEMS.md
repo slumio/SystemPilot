@@ -1,3 +1,7 @@
+> **Historical documentation notice**
+>
+> This document is retained as historical design reference. It is not valid for the current Rust application. Use the current [documentation index](../README.md), [project README](../../README.md), and [architecture guide](../../ARCHITECTURE.md) for build, configuration, deployment, and behavior.
+
 # SysPilot Master Architecture Specification: Volume 1
 ## Kernel Telemetry, eBPF CO-RE Probes & Subsystem Collector Mechanics
 
