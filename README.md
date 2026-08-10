@@ -1,224 +1,376 @@
-# 🤖 SysPilot
+# SysPilot
 
-> **High-performance Operating System Reasoning Agent** — real-time causal diagnostics, microsecond-latency telemetry, AI-powered root-cause analysis, and a zero-dependency terminal UI.
+**Evidence-first Linux diagnostics with local-first code context and provider-choice AI reasoning.**
 
-<div align="center">
+SysPilot is a Rust command-line application for investigating Linux process activity and failed commands. It combines local procfs data, an optional Netlink daemon, a causal graph, optional profiling/tracing, codebase search, streaming AI analysis, and optional HTTP telemetry export.
 
-![Language](https://img.shields.io/badge/language-C%2B%2B17-blue?style=for-the-badge&logo=cplusplus)
-![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-orange?style=for-the-badge&logo=linux)
-![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
-![Build](https://img.shields.io/badge/build-passing-brightgreen?style=for-the-badge)
+### Why SysPilot
 
-**mimalloc · simdjson · Intel TBB · Moodycamel · tsl::robin_map · AVX2 SIMD · spdlog · {fmt}**
+- **Evidence before inference:** it gathers process, scheduler, stack, and dependency evidence before asking an AI model for a causal hypothesis.
+- **Local-first context:** source chunking and vector retrieval can run locally with Ollama/Qwen, so codebase embeddings do not require a cloud provider.
+- **No model lock-in:** use a local Ollama model, Gemini, or a compatible SysPilot API for the final explanation.
+- **Built for systems contributors:** the core is Rust, Linux-native, and intentionally split into small modules for procfs, Netlink, profiling, causal analysis, and transport.
 
-</div>
+If you want to help build a transparent alternative to opaque "AI ops" tools, start with the [roadmap](docs/ROADMAP.md), read [CONTRIBUTING.md](CONTRIBUTING.md), and open a focused issue or pull request.
 
----
+This document describes the behavior implemented in this repository. It does not promise a specific diagnostic result, latency, CPU limit, or root cause. AI output is an evidence-based hypothesis and must be reviewed before operational changes are made.
 
-## What is SysPilot?
+## Contents
 
-SysPilot is a **systems-level diagnostic suite** for Linux that combines three things in one binary:
+- [Why SysPilot](#why-syspilot)
+- [What is available](#what-is-available)
+- [Requirements](#requirements)
+- [Build and first run](#build-and-first-run)
+- [AI setup](#ai-setup)
+- [Diagnostics and RCA](#diagnostics-and-rca)
+- [Daemon and monitor](#daemon-and-monitor)
+- [Distributed telemetry and alerts](#distributed-telemetry-and-alerts)
+- [Configuration reference](#configuration-reference)
+- [Limits and troubleshooting](#limits-and-troubleshooting)
+- [Development](#development)
 
-1. **`syspilotd` Daemon** — A zero-polling background service that subscribes to the Linux kernel's Netlink Process Connector (`cn_proc`) to receive process lifecycle events (fork, exec, exit) in real time. It maintains a lock-free, in-memory process tree and exposes it over a UNIX domain socket at sub-100µs latency.
+## What is available
 
-2. **CausalTrace Engine** — A directed multigraph reasoning engine that constructs a dependency graph of processes and system resources (files, sockets, block devices, pipes) from two time-stamped `/proc` snapshots. It performs a reverse-BFS traversal to trace observable symptoms (high I/O wait, zombie processes, mutex contention) back to their root causes.
-
-3. **AI Reasoning Layer** — Serializes the causal chain to a structured JSON context payload and submits it to Gemini or a local Ollama instance to generate human-readable, technically precise root-cause reports with actionable remediation steps.
-
----
-
-## ✨ Features
-
-| Feature | Description |
-|---|---|
-| **Zero-polling telemetry** | Netlink `cn_proc` events — kernel pushes process events instead of polling `/proc` |
-| **CausalTrace BFS** | Reverse-BFS multigraph traversal from symptom to root cause |
-| **AI diagnostics** | Gemini & Ollama integration with real-time streaming responses |
-| **Live TUI monitor** | Raw ANSI terminal UI — process list, anomaly highlighting, signal controls |
-| **eBPF tracing** | Optional `bpftrace` syscall tracing for open/connect/execve events |
-| **Vector codebase index** | AVX2 SIMD cosine similarity search maps causal graph nodes to source files |
-| **Terminal markdown** | Custom streaming ANSI renderer for bold, code blocks, and color |
-| **mimalloc global allocator** | Thread-local heaps; 40–70% faster allocation vs glibc |
-
----
-
-## 📦 Installation
-
-### Prerequisites
-
-| Dependency | Version | Purpose |
+| Area | What SysPilot does | What you provide |
 |---|---|---|
-| `g++` or `clang++` | C++17 | Compiler |
-| `libmimalloc-dev` | ≥ 2.1 | Global heap allocator |
-| `libsimdjson-dev` | ≥ 3.6 | SIMD JSON parsing |
-| `libspdlog-dev` | ≥ 1.12 | Async structured logging |
-| `libfmt-dev` | ≥ 9.1 | Zero-alloc string formatting |
-| `libtbb-dev` | ≥ 2021.11 | Concurrent hash map |
-| `libcurl4` | any | HTTP for AI API calls |
+| Process diagnostics | Reads Linux procfs data for a named process or PID. | A visible process and Linux procfs access. |
+| Causal analysis | Builds a process/resource graph and traces a reverse path from the selected PID. | `--pid` and `--causal`. |
+| Profiling | Includes process stack/profile data when requested. | `--deep`; system tooling may affect the result. |
+| eBPF tracing | Runs optional syscall tracing when requested. | `--ebpf`, `bpftrace`, and the required privileges. |
+| AI RCA | Streams analysis from Gemini, Ollama, or the configured SysPilot API. | A selected provider plus its valid credentials or local service. |
+| Daemon | Subscribes to Netlink process lifecycle events and serves local process/event data. | Linux kernel support for the Process Connector. |
+| Distributed telemetry | POSTs batches of lifecycle and matching alert envelopes to your HTTP collector. | An HTTPS/HTTP endpoint, node ID, and optional bearer token. |
+| Process alerts | Emits a `process_alert` telemetry envelope for matching process names. | Alert rules. This does not send email, Slack, PagerDuty, or kill processes. |
 
-Install all on Ubuntu/Debian:
+## Requirements
+
+### Required for build
+
+- A stable Rust toolchain that supports Rust edition 2021.
+- Cargo.
+
+### Required for Linux diagnostics
+
+- Linux with `/proc` mounted.
+- Permission to inspect the target process. Data for processes owned by another user can be unavailable or incomplete.
+
+### Optional tools
+
+| Tool | Used by | If absent |
+|---|---|---|
+| `curl` | Gemini, Ollama, and SysPilot streaming AI requests | AI requests fail with a visible command error. |
+| `bpftrace` | `explain --ebpf` | eBPF collection is unavailable. |
+| `perf` | Deep profiling where supported | Profile data can be limited or unavailable. |
+| systemd | Service management | Use the provided unit only on systemd hosts. |
+
+## Install and first run
+
+### Recommended: install with Cargo
+
 ```bash
-sudo apt-get install -y \
-  build-essential g++ \
-  libmimalloc-dev libsimdjson-dev \
-  libspdlog-dev libfmt-dev libtbb-dev \
-  libcurl4-openssl-dev
-```
-
-### Build
-
-```bash
-git clone https://github.com/yourusername/syspilot.git
+git clone https://github.com/slumio/g.git
 cd syspilot
-chmod +x build.sh
-./build.sh
+cargo install --path .
+syspilot setup
 ```
 
-The build script compiles with `-Ofast -flto -march=native` and links all HPC libraries. Expected output:
+`setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
 
-```
-🛠️  Compiling SysPilot — High-Performance System Intelligence Suite
-     Libraries: mimalloc · simdjson · spdlog · fmt · TBB · tsl::robin_map · ConcurrentQueue
-✅  syspilot built — all HPC libraries linked.
-```
-
-### Install
+### Build from source instead
 
 ```bash
-./syspilot install
+cargo build --release
+./target/release/syspilot setup
 ```
 
-This creates `~/.syspilot/` with:
-- `config.json` — provider settings, API keys, model selection
-- `syspilot.sh` — shell hook for capturing command history and exit codes
+Use `cargo build --release` for a portable binary. `./build_rust.sh` is an alternative local build helper that enables `target-cpu=native`.
 
-Add to your `~/.bashrc` or `~/.zshrc`:
+### Individual installation actions
+
+```bash
+# Create configuration, logs, and the Bash hook only
+syspilot install
+
+# Copy the running binary to ~/.local/bin without overwriting an existing copy
+syspilot install --binary
+
+# Replace an existing user-local copy
+syspilot install --binary --force
+
+# Remove only the user-local copy
+syspilot uninstall --binary
+```
+
+To enable shell command capture, add this line to your Bash profile, then open a new terminal:
+
 ```bash
 source ~/.syspilot/syspilot.sh
 ```
 
----
+Check the installation and next actions:
 
-## 🚀 Usage
-
-### Start the Daemon
 ```bash
-./syspilot daemon &
-```
-The daemon subscribes to Netlink `cn_proc`, initializes an in-memory process tree, and listens on `/tmp/syspilot.sock`. It has near-zero CPU usage — no polling.
-
-### Live TUI Monitor
-```bash
-./syspilot monitor
+syspilot status
+syspilot --version
 ```
 
-| Key | Action |
+## AI setup
+
+SysPilot does not send data to an AI provider until you run `ask` or `explain`. The selected provider receives the prompt context created by that command. Review that context before using an external provider in an environment with sensitive data.
+
+### Gemini
+
+```bash
+./target/release/syspilot config set-key gemini YOUR_GEMINI_API_KEY
+./target/release/syspilot provider gemini
+./target/release/syspilot ask "Explain Linux load average"
+```
+
+`GEMINI_API_KEY` overrides the configured Gemini key for the current process environment.
+
+### Ollama
+
+Start Ollama separately, then configure SysPilot:
+
+```bash
+./target/release/syspilot provider ollama
+./target/release/syspilot config set-url ollama http://localhost:11434
+./target/release/syspilot pull llama3 --set-active
+./target/release/syspilot ask "Explain Linux load average"
+```
+
+The configured Ollama URL must be a valid URL. SysPilot reports HTTP failures, connection failures, and empty streamed responses as errors.
+
+### SysPilot API
+
+```bash
+./target/release/syspilot config set-key syspilot YOUR_API_KEY
+./target/release/syspilot provider syspilot
+```
+
+The endpoint and AI request timeouts are stored in `~/.syspilot/config.json`. The shipped values are defaults, not fixed deployment requirements.
+
+## Diagnostics and RCA
+
+### Explain a failed shell command
+
+```bash
+./target/release/syspilot explain
+```
+
+This reads the most recent captured command from `~/.syspilot/context.log`. If shell integration has not recorded a command, SysPilot reports that no recent command was found.
+
+### Inspect one process
+
+```bash
+./target/release/syspilot explain --pid 1234
+./target/release/syspilot explain --pid nginx --deep
+```
+
+`--pid` accepts a numeric PID or a process name. A name is resolved from procfs; if there is no match, the command stops with an error.
+
+### Causal RCA
+
+```bash
+./target/release/syspilot explain --pid 1234 --causal
+./target/release/syspilot explain --pid 1234 --causal --ebpf
+```
+
+`--causal` requires `--pid`. SysPilot includes the causal graph and codebase context when indexing is enabled. It writes DOT and HTML graph reports below `~/syspilot_reports` when graph export succeeds.
+
+The RCA prompt requires the provider to separate observed evidence, causal hypotheses, competing explanations, confidence, and remediation. It cannot prove causality from incomplete telemetry.
+
+Useful options:
+
+| Option | Effect |
 |---|---|
-| `Tab` | Cycle sort: CPU% → I/O Rate → PID |
-| `↑` / `↓` or `j` / `k` | Navigate process list |
-| `e` or `Enter` | AI root-cause explanation for selected process |
-| `s` | Send `SIGSTOP` (suspend) |
-| `r` | Send `SIGCONT` (resume) |
-| `k` | Send `SIGKILL` (terminate) |
-| `q` | Quit |
+| `--deep` | Includes deeper process profiling in a non-causal process analysis. |
+| `--ebpf` | Requests optional eBPF tracing; privileges and `bpftrace` are required. |
+| `--no-index` | Does not query the local codebase index. |
+| `--number N` | Uses the Nth most recent captured failed command. |
 
-### Explain Last Failed Command
+### Codebase index
+
 ```bash
-./syspilot explain
+./target/release/syspilot index
+./target/release/syspilot ask "Where is process telemetry collected?"
 ```
 
-### Causal Diagnostic by PID
+Run `index --force` after source changes when you want a fresh local index.
+
+### Local Qwen embeddings with a remote explanation provider
+
+Chunking is local. To keep vector indexing and retrieval local while continuing
+to use Gemini for the final explanation, install a local embedding model and
+configure it independently:
+
 ```bash
-# Standard procfs snapshot
-./syspilot explain --pid 4582 --causal
-
-# With eBPF syscall tracing (requires root or CAP_BPF)
-sudo ./syspilot explain --pid 4582 --causal --ebpf
-
-# With deep perf CPU profiling
-./syspilot explain --pid 4582 --causal --deep
+ollama pull qwen3-embedding:0.6b
+./target/release/syspilot config set embedding_provider ollama
+./target/release/syspilot config set embedding_model qwen3-embedding:0.6b
+./target/release/syspilot index --force
 ```
 
-### Ask a General Question
+Keep `active_provider` set to `gemini`. Changing an embedding provider or model
+automatically rebuilds the local vector index on its next use.
+
+## Daemon and monitor
+
+Start the daemon in a dedicated terminal or under a service manager:
+
 ```bash
-./syspilot ask "why is vm.dirty_ratio causing write stalls under my workload?"
+./target/release/syspilot daemon
 ```
 
-### Configure AI Provider
+The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket. User installs use `$XDG_RUNTIME_DIR/syspilot/syspilot.sock` (with a UID-scoped `/tmp` fallback); the packaged system service uses `/run/syspilot/syspilot.sock`. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
+
+In another terminal:
+
 ```bash
-# Gemini
-./syspilot config set-key gemini YOUR_API_KEY
-
-# Local Ollama
-./syspilot provider ollama
-./syspilot config set-url ollama http://localhost:11434
+./target/release/syspilot events
+./target/release/syspilot monitor
 ```
 
-### Check Status / Uninstall
+`events` reads the currently queued lifecycle events from the daemon. The queue is consumed by that request, so a later `events` request only shows events received afterward.
+
+The terminal monitor supports `Tab`, arrow keys or `j`/`k`, `e` or Enter, `s`, `r`, `x`, and `q`. Signal actions depend on normal Linux process permissions.
+
+For packaged systemd deployment, install [the service unit](deploy/syspilot.service), then run:
+
 ```bash
-./syspilot status
-./syspilot uninstall
+sudo systemctl daemon-reload
+sudo systemctl enable --now syspilot
+systemctl status syspilot
 ```
 
----
+The system service runs as the dedicated `syspilot` user. Add interactive users to the `syspilot` group if they need to query its socket. For package layout and release requirements, see [Packaging](docs/PACKAGING.md).
 
-## 🏗️ Architecture (Brief)
+## Distributed telemetry and alerts
 
-```
-Linux Kernel (cn_proc)
-      │ Netlink push events (fork/exec/exit)
-      ▼
-syspilotd daemon
-  ├─ concurrent_hash_map<pid, ProcessNode>   (Intel TBB)
-  ├─ ConcurrentQueue<ProcessEventRecord>     (Moodycamel, lock-free)
-  └─ UNIX socket /tmp/syspilot.sock          (simdjson in, fmt out)
-      │
-      ▼
-CausalTrace Engine
-  ├─ take_proc_snapshot() → tsl::robin_map<pid, GraphNode>
-  ├─ build_graph() → directed multigraph
-  └─ trace_root_cause() → reverse-BFS with tsl::robin_set
-      │
-      ▼
-AI Layer (Gemini / Ollama)
-  └─ streaming JSON → MdStreamer → ANSI terminal
+Distributed telemetry is disabled by default. When enabled, the daemon sends JSON arrays of `TelemetryEnvelope` objects to the configured endpoint using HTTP POST with `Content-Type: application/json`. When a bearer token is configured, it sends `Authorization: Bearer TOKEN`.
+
+### Configure export
+
+```bash
+./target/release/syspilot config telemetry enable https://collector.example/v1/telemetry node-a YOUR_TOKEN
+./target/release/syspilot config telemetry show
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
+Restart the daemon after changing telemetry settings:
 
----
-
-## 📁 Repository Structure
-
-```
-syspilot/
-├── build.sh                  # Build script (-Ofast -flto -march=native)
-├── src/
-│   ├── main.cpp              # CLI entry point & command router
-│   ├── daemon.cpp/h          # syspilotd: Netlink + UNIX socket server
-│   ├── causal_engine.cpp/h   # CausalTrace: multigraph + BFS + export
-│   ├── telemetry.cpp/h       # /proc parser & system snapshot collector
-│   ├── ai.cpp/h              # Gemini/Ollama API + MdStreamer renderer
-│   ├── codebase.cpp/h        # Vector DB + SIMD cosine similarity search
-│   ├── profiler.cpp/h        # perf CPU profiler integration
-│   ├── config.cpp/h          # JSON config read/write (~/.syspilot/)
-│   ├── safety.cpp/h          # Command safety allowlist
-│   ├── utils.cpp/h           # String, file, shell utilities
-│   ├── install.cpp/h         # Shell hook installer
-│   ├── ui/
-│   │   ├── tui.cpp/h         # Raw ANSI terminal UI (no ncurses)
-│   │   └── streamer.cpp/h    # Real-time Markdown→ANSI renderer
-│   ├── vendor/
-│   │   ├── concurrentqueue.h  # Moodycamel ConcurrentQueue (vendored)
-│   │   └── tsl/               # tsl::robin_map / robin_set (vendored)
-│   └── nlohmann/              # nlohmann/json (vendored)
-├── ARCHITECTURE.md
-├── developer_guide.md
-└── CONTRIBUTING.md
+```bash
+./target/release/syspilot daemon
 ```
 
----
+Disable export:
 
-## 📄 License
+```bash
+./target/release/syspilot config telemetry disable
+```
 
-MIT — see [LICENSE](LICENSE).
+The exporter uses a bounded in-memory queue. It batches messages, retries failed batches according to `export_policy`, and logs an error when a batch is dropped after its retry budget. It does not persist unsent telemetry to disk and therefore does not guarantee delivery during process termination, queue overflow, or prolonged collector failure.
+
+### Add process-name alerts
+
+```bash
+./target/release/syspilot config alert add postgres-exit exact postgres
+./target/release/syspilot config alert add api-worker prefix api-
+./target/release/syspilot config alert list
+./target/release/syspilot config alert remove postgres-exit
+```
+
+- `exact` matches the complete process name reported by the kernel/procfs.
+- `prefix` matches process names that begin with the configured text.
+- A matching lifecycle event produces a `process_alert` envelope in addition to the `process_lifecycle` envelope.
+- Rules are evaluated for lifecycle events. They do not poll for process health and do not perform any local notification or remediation.
+
+### Envelope contract
+
+Each envelope contains `schema_version`, `message_id`, `node_id`, monotonically increasing `sequence`, `observed_at_unix_nanos`, `kind`, `payload`, and optional `attributes`.
+
+The collector must accept a JSON array of these envelopes and return an HTTP success status. SysPilot currently emits `process_lifecycle` and `process_alert` from the daemon. The schema also reserves other kinds for future use; they are not emitted by the current daemon.
+
+### Full telemetry configuration
+
+The CLI handles enabling export and basic rules. Edit `~/.syspilot/config.json` to set deployment attributes, labels, and delivery policy:
+
+```json
+{
+  "distributed_telemetry": {
+    "enabled": true,
+    "endpoint": "https://collector.example/v1/telemetry",
+    "node_id": "node-a",
+    "bearer_token": "replace-with-a-secret",
+    "attributes": { "environment": "production", "region": "in-1" },
+    "export_policy": {
+      "batch_size": 256,
+      "flush_interval_ms": 1000,
+      "max_queue_messages": 4096,
+      "retry_backoff_ms": 1000,
+      "max_retries": 3,
+      "request_timeout_ms": 10000
+    },
+    "process_alert_rules": [
+      {
+        "id": "postgres-exit",
+        "process_name": "postgres",
+        "match_type": "exact",
+        "enabled": true,
+        "labels": { "service": "database", "severity": "high" }
+      }
+    ]
+  }
+}
+```
+
+SysPilot validates the endpoint, node ID, rule IDs, and policy before starting the daemon or saving configuration. A duplicate alert-rule ID, invalid URL, zero timeout, or queue smaller than one batch prevents configuration from being accepted.
+
+## Configuration reference
+
+Configuration is stored at `~/.syspilot/config.json`. Do not commit this file when it contains credentials.
+
+| Field | Meaning |
+|---|---|
+| `active_provider` | `gemini`, `ollama`, or `syspilot`. |
+| `gemini_api_key`, `syspilot_api_key` | Provider credentials. Environment variables can override these keys. |
+| `ollama_url`, `ollama_model` | Local Ollama connection and model. |
+| `gemini_model`, `syspilot_model` | Selected remote model. |
+| `ai_request_timeout_seconds`, `ai_connect_timeout_seconds` | AI HTTP limits. Values must be greater than zero. |
+| `syspilot_url` | SysPilot API endpoint. |
+| `distributed_telemetry` | Endpoint, identity, delivery policy, attributes, and alert rules. |
+
+## Limits and troubleshooting
+
+| Situation | What to check |
+|---|---|
+| `Could not find process PID` | Verify the process exists, spelling is correct, and your user can inspect it. |
+| No live daemon events | Check daemon logs and kernel support/permission for `cn_proc`. The daemon can still serve its startup snapshot. |
+| AI request fails | Confirm `curl` is installed, the provider is selected, credentials are valid, and the endpoint is reachable. |
+| AI returns no usable content | The provider response did not contain a supported streamed payload. Check the endpoint/model and provider logs. |
+| No distributed export | Run `config telemetry show`, verify the collector URL and token, then restart the daemon. |
+| No process alert | Verify the kernel-reported process name with `cat /proc/PID/comm`, then choose `exact` or `prefix` accordingly. |
+| Collector receives duplicates or gaps | Use `node_id` and `sequence` for deduplication/gap detection. Delivery is at-least-attempted, not exactly-once. |
+
+For the complete document map and the status of historical material, see [Documentation](docs/README.md).
+
+## Development
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Key modules:
+
+- `src/main.rs`: CLI behavior and RCA context construction.
+- `src/daemon.rs`: Netlink listener, local socket, lifecycle events, alert evaluation.
+- `src/distributed.rs`: envelope contract, HTTP exporter, queue/retry policy, alert rules.
+- `src/telemetry.rs`: procfs readers.
+- `src/causal_engine.rs`: graph construction and causal traversal.
+- `src/ai.rs`: provider requests and streamed output handling.
+- `tests/`: integration tests.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

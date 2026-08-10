@@ -1,32 +1,29 @@
-name: SysPilot CI
+name: CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [main]
   pull_request:
-    branches: [ master, main ]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Install Build Essentials
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential g++
-
-    - name: Compile SysPilot
-      run: |
-        chmod +x ./build.sh
-        ./build.sh
-
-    - name: Verify Build Output
-      run: |
-        if [ ! -f ./syspilot ]; then
-          echo "Error: syspilot binary not found!"
-          exit 1
-        fi
-        echo "✓ SysPilot successfully compiled."
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build release binary
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syspilot-linux-x86_64
+          path: target/release/syspilot
+          if-no-files-found: error
