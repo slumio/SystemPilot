@@ -8,7 +8,7 @@ SysPilot is a Rust 2021 Linux diagnostics project. Keep changes focused, covered
 cargo build
 cargo test --workspace
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Use `./build_rust.sh` when you need the locally optimised release binary. It writes the executable to `target/release/syspilot`.

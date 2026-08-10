@@ -1,11 +1,23 @@
 # SysPilot
 
+**Evidence-first Linux diagnostics with local-first code context and provider-choice AI reasoning.**
+
 SysPilot is a Rust command-line application for investigating Linux process activity and failed commands. It combines local procfs data, an optional Netlink daemon, a causal graph, optional profiling/tracing, codebase search, streaming AI analysis, and optional HTTP telemetry export.
+
+### Why SysPilot
+
+- **Evidence before inference:** it gathers process, scheduler, stack, and dependency evidence before asking an AI model for a causal hypothesis.
+- **Local-first context:** source chunking and vector retrieval can run locally with Ollama/Qwen, so codebase embeddings do not require a cloud provider.
+- **No model lock-in:** use a local Ollama model, Gemini, or a compatible SysPilot API for the final explanation.
+- **Built for systems contributors:** the core is Rust, Linux-native, and intentionally split into small modules for procfs, Netlink, profiling, causal analysis, and transport.
+
+If you want to help build a transparent alternative to opaque "AI ops" tools, start with the [roadmap](docs/ROADMAP.md), read [CONTRIBUTING.md](CONTRIBUTING.md), and open a focused issue or pull request.
 
 This document describes the behavior implemented in this repository. It does not promise a specific diagnostic result, latency, CPU limit, or root cause. AI output is an evidence-based hypothesis and must be reviewed before operational changes are made.
 
 ## Contents
 
+- [Why SysPilot](#why-syspilot)
 - [What is available](#what-is-available)
 - [Requirements](#requirements)
 - [Build and first run](#build-and-first-run)
@@ -56,7 +68,7 @@ This document describes the behavior implemented in this repository. It does not
 ### Recommended: install with Cargo
 
 ```bash
-git clone https://github.com/your-org/syspilot.git
+git clone https://github.com/slumio/g.git
 cd syspilot
 cargo install --path .
 syspilot setup
@@ -346,7 +358,7 @@ For the complete document map and the status of historical material, see [Docume
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Key modules:
