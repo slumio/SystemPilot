@@ -1,19 +1,10 @@
 // main.rs — binary entry point.
 // The global mimalloc allocator is declared in lib.rs.
 
-mod ai;
-mod causal_engine;
-mod codebase;
-mod config;
-mod daemon;
-mod distributed;
-mod error;
-mod install;
-mod profiler;
-mod safety;
-mod telemetry;
-mod ui;
-mod utils;
+use syspilot::{
+    ai, causal_engine, codebase, config, daemon, distributed, install, profiler, telemetry, ui,
+    utils,
+};
 
 use causal_engine::CausalGraph;
 
@@ -40,7 +31,7 @@ fn read_recent_entries(count: usize) -> Vec<LogEntry> {
     };
     let lines: Vec<String> = std::io::BufReader::new(f)
         .lines()
-        .flatten()
+        .map_while(Result::ok)
         .filter(|l| !l.is_empty())
         .collect();
 
@@ -82,7 +73,7 @@ fn tail_session(max_lines: usize) -> String {
 }
 
 fn request_daemon_events() -> Result<String, String> {
-    let mut stream = UnixStream::connect("/tmp/syspilot.sock")
+    let mut stream = UnixStream::connect(crate::config::daemon_socket_path())
         .map_err(|error| format!("could not connect to the daemon: {error}"))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(750)))
@@ -167,6 +158,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         print_help();
+        return;
+    }
+    if matches!(args[1].as_str(), "version" | "--version" | "-V") {
+        println!("syspilot {}", env!("CARGO_PKG_VERSION"));
         return;
     }
 
@@ -278,7 +273,9 @@ fn main() {
         "index" => {
             let force = args.get(2).map(|a| a == "--force").unwrap_or(false);
             let (pwd, _) = utils::run_command_output("pwd");
-            codebase::update_index(pwd.trim(), &conf, force);
+            if !codebase::update_index(pwd.trim(), &conf, force) {
+                std::process::exit(1);
+            }
         }
         "config" => {
             if args.len() < 3 {
@@ -443,9 +440,16 @@ fn main() {
                         "embedding_model" | "model" => {
                             conf.embedding_model = val.clone();
                         }
+                        "embedding_provider" | "embedding-provider" => {
+                            if !["active", "gemini", "ollama"].contains(&val.as_str()) {
+                                eprintln!("❌ Invalid embedding provider. Options: active, gemini, ollama");
+                                std::process::exit(1);
+                            }
+                            conf.embedding_provider = val.clone();
+                        }
                         _ => {
                             eprintln!(
-                                "❌ Unknown option: {}. Options: chunk_strategy, embedding_model",
+                                "❌ Unknown option: {}. Options: chunk_strategy, embedding_model, embedding_provider",
                                 opt
                             );
                             std::process::exit(1);

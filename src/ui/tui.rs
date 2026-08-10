@@ -68,7 +68,7 @@ fn get_terminal_size() -> (u16, u16) {
 }
 
 fn query_daemon() -> Option<String> {
-    let mut stream = UnixStream::connect("/tmp/syspilot.sock").ok()?;
+    let mut stream = UnixStream::connect(crate::config::daemon_socket_path()).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok()?;
@@ -459,61 +459,53 @@ pub fn run_monitor() {
                     last_refresh = Instant::now() - Duration::from_secs(2);
                     needs_render = true;
                 }
-                b'j' => {
-                    if selected + 1 < processes.len() {
+                b'j'
+                    if selected + 1 < processes.len() => {
                         selected += 1;
                         needs_render = true;
                     }
-                }
-                b'k' => {
-                    if selected > 0 {
+                b'k'
+                    if selected > 0 => {
                         selected -= 1;
                         needs_render = true;
                     }
-                }
-                b's' => {
-                    if !processes.is_empty() {
+                b's'
+                    if !processes.is_empty() => {
                         unsafe {
                             libc::kill(processes[selected].pid, libc::SIGSTOP);
                         }
                     }
-                }
-                b'r' => {
-                    if !processes.is_empty() {
+                b'r'
+                    if !processes.is_empty() => {
                         unsafe {
                             libc::kill(processes[selected].pid, libc::SIGCONT);
                         }
                     }
-                }
-                b'x' => {
-                    if !processes.is_empty() {
+                b'x'
+                    if !processes.is_empty() => {
                         unsafe {
                             libc::kill(processes[selected].pid, libc::SIGKILL);
                         }
                     }
-                }
-                b'\x1b' => {
+                b'\x1b'
                     // Arrow key: ESC [ A/B
-                    if n >= 3 && buf[1] == b'[' {
+                    if n >= 3 && buf[1] == b'[' => {
                         match buf[2] {
-                            b'A' => {
-                                if selected > 0 {
+                            b'A'
+                                if selected > 0 => {
                                     selected -= 1;
                                     needs_render = true;
                                 }
-                            }
-                            b'B' => {
-                                if selected + 1 < processes.len() {
+                            b'B'
+                                if selected + 1 < processes.len() => {
                                     selected += 1;
                                     needs_render = true;
                                 }
-                            }
                             _ => {}
                         }
                     }
-                }
-                b'e' | b'\n' => {
-                    if !processes.is_empty() {
+                b'e' | b'\n'
+                    if !processes.is_empty() => {
                         let target_pid = processes[selected].pid;
                         let target_name = processes[selected].name.clone();
 
@@ -559,7 +551,6 @@ pub fn run_monitor() {
                         last_refresh = Instant::now() - Duration::from_secs(2);
                         needs_render = true;
                     }
-                }
                 _ => {}
             }
         }

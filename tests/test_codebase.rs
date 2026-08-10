@@ -1,7 +1,7 @@
 /// Tests for src/codebase.rs
 /// Covers: cosine similarity, vector normalization, file chunking, VectorDb
 /// binary round-trip.
-use syspilot::codebase::{self, DbChunk, FileRegistry, RawChunk, VectorDb};
+use syspilot::codebase::{self, DbChunk, FileRegistry, VectorDb};
 
 // ── cosine_similarity ─────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ fn cosine_result_in_range_minus_one_to_one() {
     let b = vec![-2.0f32, 4.0, -0.5, 1.0];
     let sim = codebase::cosine_similarity(&a, &b);
     assert!(
-        sim >= -1.0 && sim <= 1.0,
+        (-1.0..=1.0).contains(&sim),
         "cosine similarity must be in [-1, 1], got {}",
         sim
     );
@@ -224,6 +224,7 @@ fn chunk_file_skips_large_files() {
 fn sample_db() -> VectorDb {
     VectorDb {
         workspace_path: "/workspace/test".to_string(),
+        embedding_source: "ollama:http://localhost:11434:qwen3-embedding:0.6b".to_string(),
         files: vec![FileRegistry {
             file_path: "src/main.rs".to_string(),
             last_modified: 1_700_000_000,
@@ -307,8 +308,10 @@ fn vector_db_multiple_chunks_roundtrip() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_str().unwrap().to_string();
 
-    let mut db = VectorDb::default();
-    db.workspace_path = "/repo".to_string();
+    let mut db = VectorDb {
+        workspace_path: "/repo".to_string(),
+        ..Default::default()
+    };
     for i in 0..10u32 {
         db.chunks.push(DbChunk {
             file_path: format!("file_{}.rs", i),

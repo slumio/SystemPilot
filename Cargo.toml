@@ -3,7 +3,27 @@ name = "syspilot"
 version = "0.1.0"
 edition = "2021"
 authors = ["SysPilot Contributors"]
-description = "High-performance Operating System Reasoning Agent"
+description = "Linux process diagnostics and operating-system reasoning CLI"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/slumio/g"
+homepage = "https://github.com/slumio/g"
+keywords = ["linux", "diagnostics", "observability", "telemetry", "cli"]
+categories = ["command-line-utilities", "development-tools::debugging", "os::linux-apis"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/crates/syspilot-abi/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/deploy/syspilot.service",
+]
 
 [workspace]
 members = [".", "crates/syspilot-abi", "crates/syspilot-collector"]
@@ -21,7 +41,7 @@ path = "src/lib.rs"
 tempfile = "3.10.1"
 
 [dependencies]
-syspilot-abi = { path = "crates/syspilot-abi", features = ["serde"] }
+syspilot-abi = { version = "0.1.0", path = "crates/syspilot-abi", features = ["serde"] }
 
 # CLI argument parsing
 clap = { version = "4.5.4", features = ["derive"] }

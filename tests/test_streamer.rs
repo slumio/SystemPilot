@@ -18,9 +18,6 @@ use syspilot::ui::streamer::MdStreamer;
 // for output-content assertions.
 
 fn capture_streamer_output(inputs: &[&str]) -> String {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
-
     // Build a tiny inline Rust program that creates a MdStreamer, feeds the
     // given inputs, flushes, and exits. We run it as a child and capture
     // its stdout.
@@ -29,14 +26,10 @@ fn capture_streamer_output(inputs: &[&str]) -> String {
     // read back the result.
 
     // Simpler approach: use libc::pipe + fork
-    let mut pipe_read = 0i32;
-    let mut pipe_write = 0i32;
     let mut fds = [0i32; 2];
-    unsafe {
-        libc::pipe(fds.as_mut_ptr());
-        pipe_read = fds[0];
-        pipe_write = fds[1];
-    }
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe failed");
+    let pipe_read = fds[0];
+    let pipe_write = fds[1];
 
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0, "fork failed");

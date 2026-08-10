@@ -205,6 +205,7 @@ impl ProcessAlertEngine {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DistributedTelemetryConfig {
     pub enabled: bool,
     pub endpoint: String,
@@ -213,20 +214,6 @@ pub struct DistributedTelemetryConfig {
     pub attributes: BTreeMap<String, String>,
     pub export_policy: ExportPolicy,
     pub process_alert_rules: Vec<ProcessAlertRule>,
-}
-
-impl Default for DistributedTelemetryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: String::new(),
-            node_id: String::new(),
-            bearer_token: String::new(),
-            attributes: BTreeMap::new(),
-            export_policy: ExportPolicy::default(),
-            process_alert_rules: Vec::new(),
-        }
-    }
 }
 
 impl DistributedTelemetryConfig {

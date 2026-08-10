@@ -2,7 +2,7 @@
 ///
 /// Subscribes to Linux Netlink Process Connector (cn_proc) for zero-polling
 /// process lifecycle events. Serves process tree and event data over a UNIX
-/// socket at /tmp/syspilot.sock.
+/// socket in the configured SysPilot runtime directory.
 use crate::distributed::{ProcessAlertEngine, TelemetryKind, TelemetryPublisher};
 use dashmap::DashMap;
 use std::io::{Read, Write};
@@ -10,8 +10,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const HEALTH_PATH: &str = "/tmp/syspilot-health.json";
 
 // ── Data structures ───────────────────────────────────────────────────────────
 
@@ -70,15 +68,17 @@ fn now_ns() -> u64 {
 }
 
 fn write_health(state: &str) {
+    let health_path = crate::config::daemon_health_path();
+    let socket_path = crate::config::daemon_socket_path();
     let document = serde_json::json!({
         "state": state,
         "pid": std::process::id(),
         "heartbeat_unix_nanos": now_ns(),
-        "socket_path": "/tmp/syspilot.sock",
+        "socket_path": socket_path,
     });
-    let temporary = format!("{}.tmp", HEALTH_PATH);
+    let temporary = health_path.with_extension("tmp");
     if let Err(error) = std::fs::write(&temporary, document.to_string())
-        .and_then(|_| std::fs::rename(&temporary, HEALTH_PATH))
+        .and_then(|_| std::fs::rename(&temporary, &health_path))
     {
         tracing::warn!("[daemon] could not update health heartbeat: {}", error);
     }
@@ -255,9 +255,9 @@ fn netlink_listener(
                     );
                     // PROC_EVENT_FORK=1, PROC_EVENT_EXEC=2, PROC_EVENT_EXIT=4
                     match what {
-                        1 => {
+                        1
                             // fork: child_pid at offset +16, parent_pid at +8
-                            if ev_offset + 24 <= len as usize {
+                            if ev_offset + 24 <= len as usize => {
                                 let parent = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 8..ev_offset + 12]
                                         .try_into()
@@ -290,10 +290,9 @@ fn netlink_listener(
                                 };
                                 record_event(&events, &publisher, &alerts, event);
                             }
-                        }
-                        2 => {
+                        2
                             // exec
-                            if ev_offset + 8 <= len as usize {
+                            if ev_offset + 8 <= len as usize => {
                                 let pid = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 4..ev_offset + 8]
                                         .try_into()
@@ -320,10 +319,9 @@ fn netlink_listener(
                                 };
                                 record_event(&events, &publisher, &alerts, event);
                             }
-                        }
-                        4 => {
+                        4
                             // exit
-                            if ev_offset + 32 <= len as usize {
+                            if ev_offset + 32 <= len as usize => {
                                 let pid = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 4..ev_offset + 8]
                                         .try_into()
@@ -355,7 +353,6 @@ fn netlink_listener(
                                 };
                                 record_event(&events, &publisher, &alerts, event);
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -485,10 +482,19 @@ fn unix_socket_server(
     rx: Arc<crossbeam_channel::Receiver<ProcessEvent>>,
     running: Arc<AtomicBool>,
 ) {
-    const SOCK_PATH: &str = "/tmp/syspilot.sock";
-    let _ = std::fs::remove_file(SOCK_PATH);
+    let runtime_dir = crate::config::daemon_runtime_dir();
+    if let Err(error) = std::fs::create_dir_all(&runtime_dir) {
+        tracing::error!(
+            "[daemon] could not create runtime directory {}: {}",
+            runtime_dir.display(),
+            error
+        );
+        return;
+    }
+    let socket_path = crate::config::daemon_socket_path();
+    let _ = std::fs::remove_file(&socket_path);
 
-    let listener = match UnixListener::bind(SOCK_PATH) {
+    let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("[daemon] bind failed: {}", e);
@@ -496,12 +502,15 @@ fn unix_socket_server(
         }
     };
     let _ = std::fs::set_permissions(
-        SOCK_PATH,
-        std::os::unix::fs::PermissionsExt::from_mode(0o666),
+        &socket_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o660),
     );
 
     listener.set_nonblocking(false).ok();
-    tracing::info!("[daemon] UNIX socket listening at {}", SOCK_PATH);
+    tracing::info!(
+        "[daemon] UNIX socket listening at {}",
+        socket_path.display()
+    );
 
     let active = Arc::new(AtomicI32::new(0));
     const MAX_CLIENTS: i32 = 32;
@@ -537,7 +546,7 @@ fn unix_socket_server(
         }
     }
 
-    let _ = std::fs::remove_file(SOCK_PATH);
+    let _ = std::fs::remove_file(&socket_path);
     write_health("stopped");
 }
 

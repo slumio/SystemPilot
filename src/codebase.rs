@@ -31,6 +31,7 @@ pub struct RawChunk {
 #[derive(Default)]
 pub struct VectorDb {
     pub workspace_path: String,
+    pub embedding_source: String,
     pub files: Vec<FileRegistry>,
     pub chunks: Vec<DbChunk>,
 }
@@ -59,7 +60,9 @@ fn read_str(inp: &mut dyn Read) -> std::io::Result<String> {
 }
 
 impl VectorDb {
-    const MAGIC: &'static [u8] = b"SYSPILOT_VDB_2";
+    // V3 records the embedding source so vectors from different models are
+    // never compared or reused together.
+    const MAGIC: &'static [u8] = b"SYSPILOT_VDB_3";
 
     pub fn load_from_binary(path: &str) -> Option<Self> {
         let mut f = std::fs::File::open(path).ok()?;
@@ -70,6 +73,7 @@ impl VectorDb {
         }
 
         let workspace_path = read_str(&mut f).ok()?;
+        let embedding_source = read_str(&mut f).ok()?;
 
         let mut cnt_buf = [0u8; 4];
         f.read_exact(&mut cnt_buf).ok()?;
@@ -123,6 +127,7 @@ impl VectorDb {
 
         Some(VectorDb {
             workspace_path,
+            embedding_source,
             files,
             chunks,
         })
@@ -132,6 +137,7 @@ impl VectorDb {
         let mut f = std::fs::File::create(path)?;
         f.write_all(Self::MAGIC)?;
         write_str(&mut f, &self.workspace_path)?;
+        write_str(&mut f, &self.embedding_source)?;
 
         f.write_all(&(self.files.len() as u32).to_le_bytes())?;
         for reg in &self.files {
@@ -175,7 +181,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-pub fn normalize_vec(v: &mut Vec<f32>) {
+pub fn normalize_vec(v: &mut [f32]) {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 1e-9 {
         for x in v.iter_mut() {
@@ -358,17 +364,71 @@ pub fn chunk_file(path: &str, strategy: &str) -> Vec<RawChunk> {
 
 // ── Embeddings via API ────────────────────────────────────────────────────────
 
+fn resolved_embedding_provider(config: &Config) -> &str {
+    if config.embedding_provider == "active" {
+        &config.active_provider
+    } else {
+        &config.embedding_provider
+    }
+}
+
+fn embedding_source(config: &Config) -> String {
+    match resolved_embedding_provider(config) {
+        "ollama" => format!("ollama:{}:{}", config.ollama_url, config.embedding_model),
+        provider => format!("{}:{}", provider, config.embedding_model),
+    }
+}
+
+fn report_embedding_failure(provider: &str, response: &str, code: i32) {
+    let api_message = serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|json| json["error"]["message"].as_str().map(str::to_owned));
+    match api_message {
+        Some(message) => eprintln!(
+            "⚠️  {} embedding request failed ({}): {}",
+            provider, code, message
+        ),
+        None => eprintln!(
+            "⚠️  {} embedding request failed with exit code {}.",
+            provider, code
+        ),
+    }
+}
+
+fn parse_embeddings(response: &str) -> Vec<Vec<f32>> {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|json| json["embeddings"].as_array().cloned())
+        .map(|items| {
+            items
+                .into_iter()
+                .filter_map(|item| {
+                    let values = item
+                        .get("values")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| item.as_array())?;
+                    Some(
+                        values
+                            .iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn fetch_embeddings(texts: &[String], config: &Config) -> Vec<Vec<f32>> {
-    let mut results = Vec::new();
     if texts.is_empty() {
-        return results;
+        return Vec::new();
     }
 
-    match config.active_provider.as_str() {
+    match resolved_embedding_provider(config) {
         "gemini" => {
             if config.gemini_api_key.is_empty() {
                 eprintln!("⚠️  Gemini API key not set for embedding generation.");
-                return results;
+                return Vec::new();
             }
             let model = if config.embedding_model.contains("gemini")
                 || config.embedding_model.contains("embedding")
@@ -378,96 +438,79 @@ fn fetch_embeddings(texts: &[String], config: &Config) -> Vec<Vec<f32>> {
                 "text-embedding-004".to_string()
             };
             let model_path = if model.starts_with("models/") {
-                model.clone()
+                model
             } else {
                 format!("models/{}", model)
             };
-
             let requests: Vec<serde_json::Value> = texts
                 .iter()
-                .map(|t| {
+                .map(|text| {
                     serde_json::json!({
                         "model": model_path,
-                        "content": { "parts": [{ "text": t }] }
+                        "content": { "parts": [{ "text": text }] }
                     })
                 })
                 .collect();
             let payload = serde_json::json!({ "requests": requests }).to_string();
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/{}:batchEmbedContents?key={}",
-                model_path, config.gemini_api_key
-            );
-            let args: Vec<String> = vec![
+            let args = vec![
                 "curl".into(),
-                "-s".into(),
+                "-sS".into(),
+                "--fail-with-body".into(),
                 "-X".into(),
                 "POST".into(),
+                "--max-time".into(),
+                config.ai_request_timeout_seconds.to_string(),
+                "--connect-timeout".into(),
+                config.ai_connect_timeout_seconds.to_string(),
+                "-H".into(),
+                "Content-Type: application/json".into(),
+                "-H".into(),
+                format!("x-goog-api-key: {}", config.gemini_api_key),
+                "-d".into(),
+                "@-".into(),
+                format!(
+                    "https://generativelanguage.googleapis.com/v1beta/{}:batchEmbedContents",
+                    model_path
+                ),
+            ];
+            let (response, code) = utils::run_command_secure(&args, &payload);
+            if code != 0 {
+                report_embedding_failure("Gemini", &response, code);
+                return Vec::new();
+            }
+            parse_embeddings(&response)
+        }
+        "ollama" => {
+            let payload =
+                serde_json::json!({ "model": config.embedding_model, "input": texts }).to_string();
+            let args = vec![
+                "curl".into(),
+                "-sS".into(),
+                "--fail-with-body".into(),
+                "-X".into(),
+                "POST".into(),
+                "--max-time".into(),
+                config.ai_request_timeout_seconds.to_string(),
+                "--connect-timeout".into(),
+                config.ai_connect_timeout_seconds.to_string(),
                 "-H".into(),
                 "Content-Type: application/json".into(),
                 "-d".into(),
                 "@-".into(),
-                url,
+                format!("{}/api/embed", config.ollama_url),
             ];
-            let (resp, code) = utils::run_command_secure(&args, &payload);
-            if code == 0 {
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&resp) {
-                    if let Some(arr) = j["embeddings"].as_array() {
-                        for item in arr {
-                            if let Some(vals) = item["values"].as_array() {
-                                results.push(
-                                    vals.iter()
-                                        .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                        .collect(),
-                                );
-                            }
-                        }
-                    }
-                }
+            let (response, code) = utils::run_command_secure(&args, &payload);
+            if code != 0 {
+                report_embedding_failure("Ollama", &response, code);
+                return Vec::new();
             }
+            parse_embeddings(&response)
         }
-        "ollama" => {
-            for text in texts {
-                let truncated = if text.len() > 1000 {
-                    &text[..1000]
-                } else {
-                    text.as_str()
-                };
-                let payload =
-                    serde_json::json!({ "model": config.embedding_model, "input": truncated })
-                        .to_string();
-                let url = format!("{}/api/embed", config.ollama_url);
-                let args: Vec<String> = vec![
-                    "curl".into(),
-                    "-s".into(),
-                    "-X".into(),
-                    "POST".into(),
-                    "-H".into(),
-                    "Content-Type: application/json".into(),
-                    "-d".into(),
-                    "@-".into(),
-                    url,
-                ];
-                let (resp, code) = utils::run_command_secure(&args, &payload);
-                if code == 0 {
-                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&resp) {
-                        if let Some(arr) = j["embeddings"].as_array() {
-                            for item in arr {
-                                if let Some(vals) = item.as_array() {
-                                    results.push(
-                                        vals.iter()
-                                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                            .collect(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        provider => {
+            eprintln!("⚠️  Unsupported embedding provider: {}", provider);
+            Vec::new()
         }
-        _ => {}
     }
-    results
 }
 
 // ── DB path ───────────────────────────────────────────────────────────────────
@@ -493,7 +536,13 @@ pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
     } else {
         VectorDb::default()
     };
+    let expected_embedding_source = embedding_source(config);
+    if !db.embedding_source.is_empty() && db.embedding_source != expected_embedding_source {
+        println!("ℹ️  Embedding model changed; rebuilding the vector index.");
+        db = VectorDb::default();
+    }
     db.workspace_path = workspace.to_string();
+    db.embedding_source = expected_embedding_source;
 
     let all_files = utils::list_directory(workspace, true);
     let registry: HashMap<String, &FileRegistry> =
@@ -563,7 +612,7 @@ pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
         let batch = 50;
         let mut all_embeds: Vec<Vec<f32>> = Vec::new();
         for chunk in texts.chunks(batch) {
-            let sub = fetch_embeddings(&chunk.to_vec(), config);
+            let sub = fetch_embeddings(chunk, config);
             all_embeds.extend(sub);
         }
         if all_embeds.len() == new_chunks.len() {
@@ -579,6 +628,7 @@ pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
                 new_chunks.len(),
                 all_embeds.len()
             );
+            return false;
         }
     }
 

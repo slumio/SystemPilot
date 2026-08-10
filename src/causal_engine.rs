@@ -67,6 +67,12 @@ pub struct CausalGraph {
     pub edges: Vec<GraphEdge>,
 }
 
+impl Default for CausalGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CausalGraph {
     pub fn new() -> Self {
         CausalGraph {
@@ -92,7 +98,7 @@ impl CausalGraph {
 // ── Daemon query ──────────────────────────────────────────────────────────────
 
 fn query_daemon() -> Option<String> {
-    let mut stream = UnixStream::connect("/tmp/syspilot.sock").ok()?;
+    let mut stream = UnixStream::connect(crate::config::daemon_socket_path()).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok()?;

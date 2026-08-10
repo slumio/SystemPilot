@@ -29,6 +29,11 @@ pub struct Config {
     #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
 
+    /// Provider used exclusively for vector embeddings. `active` preserves the
+    /// legacy behaviour of using the chat/explanation provider.
+    #[serde(default = "default_embedding_provider")]
+    pub embedding_provider: String,
+
     #[serde(default = "default_chunk_strategy")]
     pub chunk_strategy: String,
 
@@ -63,6 +68,9 @@ fn default_ollama_model() -> String {
 fn default_embedding_model() -> String {
     "text-embedding-004".to_string()
 }
+fn default_embedding_provider() -> String {
+    "active".to_string()
+}
 fn default_chunk_strategy() -> String {
     "syntactic".to_string()
 }
@@ -87,6 +95,7 @@ impl Default for Config {
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
             embedding_model: default_embedding_model(),
+            embedding_provider: default_embedding_provider(),
             chunk_strategy: default_chunk_strategy(),
             ai_request_timeout_seconds: default_ai_request_timeout_seconds(),
             ai_connect_timeout_seconds: default_ai_connect_timeout_seconds(),
@@ -97,9 +106,37 @@ impl Default for Config {
 }
 
 pub fn get_syspilot_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("SYSPILOT_HOME").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".syspilot")
+}
+
+/// Directory shared by the daemon and CLI for its Unix socket and heartbeat.
+/// A packaged system daemon uses `/run/syspilot`; source and user installs get
+/// a per-user directory under XDG_RUNTIME_DIR (or a UID-scoped /tmp fallback).
+pub fn daemon_runtime_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("SYSPILOT_RUNTIME_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let system_dir = PathBuf::from("/run/syspilot");
+    if system_dir.is_dir() {
+        return system_dir;
+    }
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(runtime_dir).join("syspilot");
+    }
+    PathBuf::from(format!("/tmp/syspilot-{}", unsafe { libc::geteuid() }))
+}
+
+pub fn daemon_socket_path() -> PathBuf {
+    daemon_runtime_dir().join("syspilot.sock")
+}
+
+pub fn daemon_health_path() -> PathBuf {
+    daemon_runtime_dir().join("health.json")
 }
 
 pub fn validate(cfg: &Config) -> AppResult<()> {
@@ -147,6 +184,13 @@ pub fn load_checked() -> AppResult<Config> {
         || (!cfg.gemini_model.contains('/') && !cfg.gemini_model.contains('-'))
     {
         cfg.gemini_model = default_gemini_model();
+    }
+
+    if !["active", "gemini", "ollama"].contains(&cfg.embedding_provider.as_str()) {
+        return Err(AppError::Validation(format!(
+            "invalid embedding provider '{}'; use active, gemini, or ollama",
+            cfg.embedding_provider
+        )));
     }
 
     validate(&cfg)?;

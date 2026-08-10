@@ -23,6 +23,7 @@ fn default_config_fields() {
     assert_eq!(c.ollama_url, "http://localhost:11434");
     assert_eq!(c.ollama_model, "llama3");
     assert_eq!(c.embedding_model, "text-embedding-004");
+    assert_eq!(c.embedding_provider, "active");
     assert_eq!(c.chunk_strategy, "syntactic");
     assert!(c.gemini_api_key.is_empty());
     assert!(c.syspilot_api_key.is_empty());
@@ -41,6 +42,7 @@ fn config_serialises_and_deserialises() {
         ollama_url: "http://localhost:11434".to_string(),
         ollama_model: "llama3".to_string(),
         embedding_model: "text-embedding-004".to_string(),
+        embedding_provider: "ollama".to_string(),
         chunk_strategy: "line".to_string(),
         ai_request_timeout_seconds: 120,
         ai_connect_timeout_seconds: 15,
@@ -55,6 +57,7 @@ fn config_serialises_and_deserialises() {
     assert_eq!(restored.gemini_api_key, original.gemini_api_key);
     assert_eq!(restored.chunk_strategy, original.chunk_strategy);
     assert_eq!(restored.ollama_model, original.ollama_model);
+    assert_eq!(restored.embedding_provider, original.embedding_provider);
 }
 
 #[test]

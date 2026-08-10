@@ -99,6 +99,7 @@ Check the installation and next actions:
 
 ```bash
 syspilot status
+syspilot --version
 ```
 
 ## AI setup
@@ -185,6 +186,22 @@ Useful options:
 
 Run `index --force` after source changes when you want a fresh local index.
 
+### Local Qwen embeddings with a remote explanation provider
+
+Chunking is local. To keep vector indexing and retrieval local while continuing
+to use Gemini for the final explanation, install a local embedding model and
+configure it independently:
+
+```bash
+ollama pull qwen3-embedding:0.6b
+./target/release/syspilot config set embedding_provider ollama
+./target/release/syspilot config set embedding_model qwen3-embedding:0.6b
+./target/release/syspilot index --force
+```
+
+Keep `active_provider` set to `gemini`. Changing an embedding provider or model
+automatically rebuilds the local vector index on its next use.
+
 ## Daemon and monitor
 
 Start the daemon in a dedicated terminal or under a service manager:
@@ -193,7 +210,7 @@ Start the daemon in a dedicated terminal or under a service manager:
 ./target/release/syspilot daemon
 ```
 
-The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket at `/tmp/syspilot.sock`. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
+The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket. User installs use `$XDG_RUNTIME_DIR/syspilot/syspilot.sock` (with a UID-scoped `/tmp` fallback); the packaged system service uses `/run/syspilot/syspilot.sock`. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
 
 In another terminal:
 
@@ -206,7 +223,15 @@ In another terminal:
 
 The terminal monitor supports `Tab`, arrow keys or `j`/`k`, `e` or Enter, `s`, `r`, `x`, and `q`. Signal actions depend on normal Linux process permissions.
 
-For systemd deployment and health checks, see [Daemon Reliability](docs/RELIABILITY.md).
+For packaged systemd deployment, install [the service unit](deploy/syspilot.service), then run:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now syspilot
+systemctl status syspilot
+```
+
+The system service runs as the dedicated `syspilot` user. Add interactive users to the `syspilot` group if they need to query its socket. For package layout and release requirements, see [Packaging](docs/PACKAGING.md).
 
 ## Distributed telemetry and alerts
 

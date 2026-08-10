@@ -10,7 +10,7 @@ fn profile_current_process_no_perf_returns_report() {
     let report = profiler::profile_process(pid, false);
     // pid must be reachable → struct should be returned (may have empty stacks
     // if CAP_SYS_ADMIN is absent, which is expected in CI)
-    assert_eq!(report.perf_available, false);
+    assert!(!report.perf_available);
     // top_symbols must be empty when perf wasn't run
     assert!(report.top_symbols.is_empty());
 }
@@ -47,7 +47,7 @@ fn serialized_profile_is_valid_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&json_str).expect("serialized profile must be valid JSON");
 
-    assert_eq!(parsed["perf_available"].as_bool().unwrap(), true);
+    assert!(parsed["perf_available"].as_bool().unwrap());
     assert!(parsed["top_symbols"].is_array());
     assert!(parsed["active_stacks"].is_array());
     assert!(parsed["call_graph_summary"].is_string());
@@ -107,7 +107,7 @@ fn serialized_empty_profile_is_valid_json() {
     let json_str = profiler::serialize_profile_to_json(&report);
     let parsed: serde_json::Value =
         serde_json::from_str(&json_str).expect("empty profile must produce valid JSON");
-    assert_eq!(parsed["perf_available"].as_bool().unwrap(), false);
+    assert!(!parsed["perf_available"].as_bool().unwrap());
     assert_eq!(parsed["top_symbols"].as_array().unwrap().len(), 0);
     assert_eq!(parsed["active_stacks"].as_array().unwrap().len(), 0);
 }

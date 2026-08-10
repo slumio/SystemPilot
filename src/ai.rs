@@ -125,32 +125,30 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
             return;
         }
         line_buffer2.push_str(chunk);
-        loop {
-            if let Some(nl) = line_buffer2.find('\n') {
-                let line = line_buffer2[..nl].trim().to_string();
-                line_buffer2.drain(..=nl);
-                if line.is_empty() {
-                    continue;
-                }
-                // SAFETY: single-threaded callback, no aliasing
-                let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
+        while let Some(nl) = line_buffer2.find('\n') {
+            let line = line_buffer2[..nl].trim().to_string();
+            line_buffer2.drain(..=nl);
+            if line.is_empty() {
+                continue;
+            }
+            // SAFETY: single-threaded callback, no aliasing
+            let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
 
-                match provider2.as_str() {
-                    "gemini" => {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data.is_empty() {
-                                continue;
-                            }
-                            if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(candidates) = j["candidates"].as_array() {
-                                    for c in candidates {
-                                        if let Some(parts) = c["content"]["parts"].as_array() {
-                                            for p in parts {
-                                                if let Some(text) = p["text"].as_str() {
-                                                    received_content.set(true);
-                                                    s.print(text);
-                                                }
+            match provider2.as_str() {
+                "gemini" => {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data.is_empty() {
+                            continue;
+                        }
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(candidates) = j["candidates"].as_array() {
+                                for c in candidates {
+                                    if let Some(parts) = c["content"]["parts"].as_array() {
+                                        for p in parts {
+                                            if let Some(text) = p["text"].as_str() {
+                                                received_content.set(true);
+                                                s.print(text);
                                             }
                                         }
                                     }
@@ -158,37 +156,35 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                             }
                         }
                     }
-                    "ollama" => {
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(text) = j["message"]["content"].as_str() {
-                                received_content.set(true);
-                                s.print(text);
-                            }
+                }
+                "ollama" => {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(text) = j["message"]["content"].as_str() {
+                            received_content.set(true);
+                            s.print(text);
                         }
                     }
-                    "syspilot" => {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data == "[DONE]" {
-                                done_cell.set(true);
-                                return;
-                            }
-                            if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(choices) = j["choices"].as_array() {
-                                    for ch in choices {
-                                        if let Some(text) = ch["delta"]["content"].as_str() {
-                                            received_content.set(true);
-                                            s.print(text);
-                                        }
+                }
+                "syspilot" => {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            done_cell.set(true);
+                            return;
+                        }
+                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(choices) = j["choices"].as_array() {
+                                for ch in choices {
+                                    if let Some(text) = ch["delta"]["content"].as_str() {
+                                        received_content.set(true);
+                                        s.print(text);
                                     }
                                 }
                             }
                         }
                     }
-                    _ => {}
                 }
-            } else {
-                break;
+                _ => {}
             }
         }
     });
@@ -232,32 +228,28 @@ pub fn pull_ollama_model(config: &Config, model_name: &str) -> bool {
 
     let (ok, code) = utils::run_command_secure_stream(&curl_args, payload, |chunk: &str| {
         line_buf.push_str(chunk);
-        loop {
-            if let Some(nl) = line_buf.find('\n') {
-                let line = line_buf[..nl].trim().to_string();
-                line_buf.drain(..=nl);
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(status) = j["status"].as_str() {
-                        if j["completed"].is_number() && j["total"].is_number() {
-                            let done = j["completed"].as_f64().unwrap_or(0.0);
-                            let total = j["total"].as_f64().unwrap_or(1.0);
-                            let pct = if total > 0.0 {
-                                done / total * 100.0
-                            } else {
-                                0.0
-                            };
-                            print!("\r{:<40} [{:.2}%]", status, pct);
+        while let Some(nl) = line_buf.find('\n') {
+            let line = line_buf[..nl].trim().to_string();
+            line_buf.drain(..=nl);
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(status) = j["status"].as_str() {
+                    if j["completed"].is_number() && j["total"].is_number() {
+                        let done = j["completed"].as_f64().unwrap_or(0.0);
+                        let total = j["total"].as_f64().unwrap_or(1.0);
+                        let pct = if total > 0.0 {
+                            done / total * 100.0
                         } else {
-                            print!("\r{:<50}", status);
-                        }
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                            0.0
+                        };
+                        print!("\r{:<40} [{:.2}%]", status, pct);
+                    } else {
+                        print!("\r{:<50}", status);
                     }
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
-            } else {
-                break;
             }
         }
     });

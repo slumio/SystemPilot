@@ -1,5 +1,5 @@
 [Unit]
-Description=SysPilot process telemetry daemon (legacy unit name)
+Description=SysPilot process telemetry daemon
 Documentation=https://github.com/slumio/g
 After=network-online.target
 Wants=network-online.target
