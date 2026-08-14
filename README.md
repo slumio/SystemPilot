@@ -58,7 +58,7 @@ This document describes the behavior implemented in this repository. It does not
 
 | Tool | Used by | If absent |
 |---|---|---|
-| `curl` | Gemini, Ollama, and SysPilot streaming AI requests | AI requests fail with a visible command error. |
+| `curl` | Ollama model downloads through `syspilot pull` | Model downloads fail with a visible command error. AI questions use the built-in Rust HTTP client. |
 | `bpftrace` | `explain --ebpf` | eBPF collection is unavailable. |
 | `perf` | Deep profiling where supported | Profile data can be limited or unavailable. |
 | systemd | Service management | Use the provided unit only on systemd hosts. |
@@ -360,7 +360,7 @@ Configuration is stored at `~/.syspilot/config.json`. Do not commit this file wh
 |---|---|
 | `Could not find process PID` | Verify the process exists, spelling is correct, and your user can inspect it. |
 | No live daemon events | Check daemon logs and kernel support/permission for `cn_proc`. The daemon can still serve its startup snapshot. |
-| AI request fails | Confirm `curl` is installed, the provider is selected, credentials are valid, and the endpoint is reachable. |
+| AI request fails | Read the reported HTTP/provider message, then verify the selected provider, credentials, model, and endpoint. For Gemini 404 errors, run `syspilot model gemini-3.6-flash`. |
 | AI returns no usable content | The provider response did not contain a supported streamed payload. Check the endpoint/model and provider logs. |
 | No distributed export | Run `config telemetry show`, verify the collector URL and token, then restart the daemon. |
 | No process alert | Verify the kernel-reported process name with `cat /proc/PID/comm`, then choose `exact` or `prefix` accordingly. |
