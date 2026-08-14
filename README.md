@@ -74,7 +74,7 @@ syspilot status
 syspilot ask "Why is Linux load average high?"
 ```
 
-The installer requires Linux, `curl`, `tar`, and a Rust toolchain with Cargo. It downloads the source archive over HTTPS and installs with the committed lockfile. Review [install.sh](install.sh) before piping it to a shell.
+The installer requires Linux, `curl`, `tar`, and a Rust toolchain with Cargo. It downloads the source archive over HTTPS, installs with the committed lockfile, and atomically updates `~/.local/bin/syspilot` so an older binary cannot remain first on `PATH`. Review [install.sh](install.sh) before piping it to a shell.
 
 `setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
 

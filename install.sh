@@ -28,9 +28,16 @@ rm -f "$archive_path"
 say "Building and installing SysPilot..."
 cargo install --locked --path "$install_dir"
 
-if command -v syspilot >/dev/null 2>&1; then
-    say ""; say "SysPilot installed successfully."; say "Next: syspilot setup"
-else
-    cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-    say ""; say "SysPilot installed to ${cargo_bin}/syspilot."; say "Add ${cargo_bin} to PATH, then run: syspilot setup"
-fi
+cargo_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
+installed_binary="${cargo_root}/bin/syspilot"
+[ -x "$installed_binary" ] || fail "Cargo completed but ${installed_binary} was not created."
+
+# Keep the user-local path used by `syspilot setup` in sync. Atomic replacement
+# allows this to update an older binary even when a daemon is still executing it.
+"$installed_binary" install --binary --force ||
+    fail "the build succeeded, but the user-local binary could not be updated."
+
+say ""
+say "SysPilot installed successfully."
+say "Binary: $HOME/.local/bin/syspilot"
+say "Next: syspilot setup"
