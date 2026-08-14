@@ -16,9 +16,14 @@ install_dir=$(mktemp -d "${TMPDIR:-/tmp}/syspilot-install.XXXXXX") || fail "coul
 trap 'rm -rf "$install_dir"' EXIT HUP INT TERM
 
 archive_url="https://github.com/${REPOSITORY}/archive/${REF}.tar.gz"
+archive_path="${install_dir}/source.tar.gz"
 say "Downloading SysPilot (${REF})..."
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$archive_url" |
-    tar -xz --strip-components=1 -C "$install_dir" || fail "download failed. Check the version and network connection."
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    --output "$archive_path" "$archive_url" ||
+    fail "could not download ref '${REF}'. Use an existing branch or release tag."
+tar -xzf "$archive_path" --strip-components=1 -C "$install_dir" ||
+    fail "the downloaded source archive is invalid."
+rm -f "$archive_path"
 
 say "Building and installing SysPilot..."
 cargo install --locked --path "$install_dir"

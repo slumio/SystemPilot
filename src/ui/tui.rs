@@ -5,7 +5,6 @@ use crate::ui::streamer::MdStreamer;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -68,7 +67,7 @@ fn get_terminal_size() -> (u16, u16) {
 }
 
 fn query_daemon() -> Option<String> {
-    let mut stream = UnixStream::connect(crate::config::daemon_socket_path()).ok()?;
+    let mut stream = crate::config::connect_daemon().ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok()?;
