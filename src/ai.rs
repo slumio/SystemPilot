@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::ui::streamer::MdStreamer;
 use crate::utils;
+use std::io::{BufRead, BufReader, Read};
 
 pub const REASONING_SYSTEM_PROMPT: &str = "You are the SysPilot Operating System Reasoning Agent, \
 an expert in kernel subsystems, hardware architecture, program analysis, and systems performance engineering.\n\
@@ -37,7 +38,7 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
                 || config.gemini_model == "gemini"
                 || (!config.gemini_model.contains('/') && !config.gemini_model.contains('-'))
             {
-                "gemini-2.0-flash"
+                "gemini-3.6-flash"
             } else {
                 &config.gemini_model
             };
@@ -91,165 +92,137 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
         }
     };
 
-    // Build curl args — no shell injection, all args passed directly to execvp
-    let mut curl_args: Vec<String> = vec![
-        "curl".into(),
-        "-sS".into(),
-        "--fail-with-body".into(),
-        "-N".into(),
-        "-X".into(),
-        "POST".into(),
-        "--max-time".into(),
-        config.ai_request_timeout_seconds.to_string(),
-        "--connect-timeout".into(),
-        config.ai_connect_timeout_seconds.to_string(),
-        "-H".into(),
-        "Content-Type: application/json".into(),
-    ];
-    for h in &headers {
-        curl_args.push("-H".into());
-        curl_args.push(h.clone());
+    let client = match reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(
+            config.ai_connect_timeout_seconds,
+        ))
+        .timeout(std::time::Duration::from_secs(
+            config.ai_request_timeout_seconds,
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("❌ Could not initialize the AI HTTP client: {error}");
+            return false;
+        }
+    };
+    let mut request = client.post(&url).header("Content-Type", "application/json");
+    for header in headers {
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        request = request.header(name.trim(), value.trim());
     }
-    curl_args.push("-d".into());
-    curl_args.push("@-".into()); // read payload from stdin
-    curl_args.push(url.clone());
-
-    // Use UnsafeCell to allow mutation of streamer inside the FnMut callback.
-    // This is safe because the callback is called single-threadedly by
-    // run_command_secure_stream on the current thread.
-    let streamer_cell = std::cell::UnsafeCell::new(streamer);
-    let done_cell = std::cell::Cell::new(false);
-    let received_content = std::cell::Cell::new(false);
-    let mut line_buffer2 = String::new();
-    let provider2 = config.active_provider.clone();
-
-    let (ok, code) = utils::run_command_secure_stream(&curl_args, payload, |chunk: &str| {
-        if done_cell.get() {
-            return;
+    let response = match request.body(payload).send() {
+        Ok(response) => response,
+        Err(error) => {
+            let kind = if error.is_timeout() {
+                "timed out"
+            } else if error.is_connect() {
+                "could not connect"
+            } else {
+                "failed"
+            };
+            eprintln!("❌ AI request {kind}: {error}");
+            return false;
         }
-        line_buffer2.push_str(chunk);
-        while let Some(nl) = line_buffer2.find('\n') {
-            let line = line_buffer2[..nl].trim().to_string();
-            line_buffer2.drain(..=nl);
-            if line.is_empty() {
-                continue;
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let mut body = String::new();
+        let mut response = response;
+        let _ = response.read_to_string(&mut body);
+        let message = provider_error_message(&body).unwrap_or_else(|| body.trim().to_string());
+        eprintln!(
+            "❌ AI provider returned HTTP {}: {}",
+            status.as_u16(),
+            if message.is_empty() {
+                status.canonical_reason().unwrap_or("request failed")
+            } else {
+                &message
             }
-            // SAFETY: single-threaded callback, no aliasing
-            let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
-
-            match provider2.as_str() {
-                "gemini" => {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data.is_empty() {
-                            continue;
-                        }
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(candidates) = j["candidates"].as_array() {
-                                for c in candidates {
-                                    if let Some(parts) = c["content"]["parts"].as_array() {
-                                        for p in parts {
-                                            if let Some(text) = p["text"].as_str() {
-                                                received_content.set(true);
-                                                s.print(text);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                "ollama" => {
-                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if let Some(text) = j["message"]["content"].as_str() {
-                            received_content.set(true);
-                            s.print(text);
-                        }
-                    }
-                }
-                "syspilot" => {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data == "[DONE]" {
-                            done_cell.set(true);
-                            return;
-                        }
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(choices) = j["choices"].as_array() {
-                                for ch in choices {
-                                    if let Some(text) = ch["delta"]["content"].as_str() {
-                                        received_content.set(true);
-                                        s.print(text);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+        );
+        if status.as_u16() == 404 && config.active_provider == "gemini" {
+            eprintln!("   The configured Gemini model may not exist. Run: syspilot model gemini-3.6-flash");
         }
-    });
-
-    // Compatible APIs do not always terminate the final event with a newline.
-    if !line_buffer2.trim().is_empty() {
-        let line = line_buffer2.trim();
-        let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
-        match provider2.as_str() {
-            "ollama" => {
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
-                    if let Some(text) = j["message"]["content"]
-                        .as_str()
-                        .or_else(|| j["response"].as_str())
-                    {
-                        received_content.set(true);
-                        s.print(text);
-                    }
-                }
-            }
-            "syspilot" => {
-                let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(text) = j["choices"][0]["delta"]["content"]
-                        .as_str()
-                        .or_else(|| j["choices"][0]["message"]["content"].as_str())
-                    {
-                        received_content.set(true);
-                        s.print(text);
-                    }
-                }
-            }
-            "gemini" => {
-                if let Some(data) = line.strip_prefix("data:").map(str::trim) {
-                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(text) =
-                            j["candidates"][0]["content"]["parts"][0]["text"].as_str()
-                        {
-                            received_content.set(true);
-                            s.print(text);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
-    s.flush();
-    println!();
-
-    if !ok || code != 0 {
-        eprintln!("❌ AI provider request failed with exit code: {}", code);
         return false;
     }
-    if !received_content.get() {
+
+    let mut received_content = false;
+    for line in BufReader::new(response).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                eprintln!("❌ AI response stream failed: {error}");
+                return false;
+            }
+        };
+        for text in streamed_text(&config.active_provider, &line) {
+            received_content = true;
+            streamer.print(&text);
+        }
+    }
+    streamer.flush();
+    println!();
+    if !received_content {
         eprintln!("❌ AI provider returned no usable streamed content.");
         return false;
     }
 
     true
+}
+
+fn json_data(line: &str) -> &str {
+    line.trim()
+        .strip_prefix("data:")
+        .map(str::trim)
+        .unwrap_or_else(|| line.trim())
+}
+
+fn provider_error_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_data(body)).ok()?;
+    value["error"]["message"]
+        .as_str()
+        .or_else(|| value["message"].as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn streamed_text(provider: &str, line: &str) -> Vec<String> {
+    let data = json_data(line);
+    if data.is_empty() || data == "[DONE]" {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+    match provider {
+        "gemini" => value["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate["content"]["parts"].as_array())
+            .flatten()
+            .filter_map(|part| part["text"].as_str().map(ToOwned::to_owned))
+            .collect(),
+        "ollama" => value["message"]["content"]
+            .as_str()
+            .or_else(|| value["response"].as_str())
+            .map(|s| vec![s.to_owned()])
+            .unwrap_or_default(),
+        "syspilot" => value["choices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|choice| {
+                choice["delta"]["content"]
+                    .as_str()
+                    .or_else(|| choice["message"]["content"].as_str())
+                    .map(ToOwned::to_owned)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 pub fn pull_ollama_model(config: &Config, model_name: &str) -> bool {
@@ -307,4 +280,41 @@ pub fn pull_ollama_model(config: &Config, model_name: &str) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_error_message, streamed_text};
+
+    #[test]
+    fn parses_supported_stream_formats() {
+        assert_eq!(
+            streamed_text(
+                "gemini",
+                r#"data:{"candidates":[{"content":{"parts":[{"text":"gemini"}]}}]}"#,
+            ),
+            ["gemini"]
+        );
+        assert_eq!(
+            streamed_text("ollama", r#"{"message":{"content":"ollama"}}"#),
+            ["ollama"]
+        );
+        assert_eq!(
+            streamed_text(
+                "syspilot",
+                r#"data: {"choices":[{"delta":{"content":"compatible"}}]}"#,
+            ),
+            ["compatible"]
+        );
+        assert!(streamed_text("syspilot", "data: [DONE]").is_empty());
+    }
+
+    #[test]
+    fn extracts_provider_error_body() {
+        let body = r#"{"error":{"code":404,"message":"model not found"}}"#;
+        assert_eq!(
+            provider_error_message(body).as_deref(),
+            Some("model not found")
+        );
+    }
 }

@@ -57,7 +57,7 @@ fn default_provider() -> String {
     "gemini".to_string()
 }
 fn default_gemini_model() -> String {
-    "gemini-2.0-flash".to_string()
+    "gemini-3.6-flash".to_string()
 }
 fn default_syspilot_model() -> String {
     "syspilot-1".to_string()
@@ -216,6 +216,7 @@ pub fn load_checked() -> AppResult<Config> {
     // Sanitize gemini model name
     if cfg.gemini_model.is_empty()
         || cfg.gemini_model == "gemini"
+        || cfg.gemini_model == "gemini-2.0-flash"
         || (!cfg.gemini_model.contains('/') && !cfg.gemini_model.contains('-'))
     {
         cfg.gemini_model = default_gemini_model();
