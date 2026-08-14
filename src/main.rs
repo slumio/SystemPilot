@@ -540,7 +540,9 @@ fn main() {
             );
 
             let mut streamer = MdStreamer::new();
-            ai::query_ai_stream(&conf, &prompt, &mut streamer);
+            if !ai::query_ai_stream(&conf, &prompt, &mut streamer) {
+                std::process::exit(1);
+            }
             println!("\n\x1b[90m{}\x1b[0m", "-".repeat(60));
         }
         "explain" => {
@@ -754,7 +756,9 @@ fn main() {
             };
 
             let mut streamer = MdStreamer::new();
-            ai::query_ai_stream(&conf, &prompt, &mut streamer);
+            if !ai::query_ai_stream(&conf, &prompt, &mut streamer) {
+                std::process::exit(1);
+            }
             println!("\n\x1b[90m{}\x1b[0m", "-".repeat(60));
         }
         _ => {

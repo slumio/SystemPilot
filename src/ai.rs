@@ -18,7 +18,10 @@ IMPORTANT TERMINAL FORMATTING RULES:\n\
 1. When outputting mathematical formulas or equations, NEVER use raw LaTeX syntax like \\frac or \\sqrt.\n\
 2. Instead, use user-friendly, plain-text ASCII math (e.g., (a + b) / c, sqrt(x)).\n\
 3. Wrap code or math snippets in backticks (`).\n\
-4. Keep explanations concise, clear, and highly technical.";
+4. Keep explanations concise, clear, and highly technical.\n\
+5. Clearly label observations, hypotheses, confidence, and recommended next steps.\n\
+6. Never invent telemetry, commands, files, or source locations. If evidence is missing, say what is missing and how to collect it.\n\
+7. Prefer safe, reversible checks before disruptive remediation.";
 
 /// Stream AI response to terminal via MdStreamer.
 pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer) -> bool {
@@ -188,6 +191,50 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
             }
         }
     });
+
+    // Compatible APIs do not always terminate the final event with a newline.
+    if !line_buffer2.trim().is_empty() {
+        let line = line_buffer2.trim();
+        let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
+        match provider2.as_str() {
+            "ollama" => {
+                if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(text) = j["message"]["content"]
+                        .as_str()
+                        .or_else(|| j["response"].as_str())
+                    {
+                        received_content.set(true);
+                        s.print(text);
+                    }
+                }
+            }
+            "syspilot" => {
+                let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+                if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(text) = j["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .or_else(|| j["choices"][0]["message"]["content"].as_str())
+                    {
+                        received_content.set(true);
+                        s.print(text);
+                    }
+                }
+            }
+            "gemini" => {
+                if let Some(data) = line.strip_prefix("data:").map(str::trim) {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(text) =
+                            j["candidates"][0]["content"]["parts"][0]["text"].as_str()
+                        {
+                            received_content.set(true);
+                            s.print(text);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     let s: &mut MdStreamer = unsafe { &mut *streamer_cell.get() };
     s.flush();
