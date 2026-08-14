@@ -9,7 +9,7 @@ cargo build --release
 cargo test --workspace
 ```
 
-`./build_rust.sh` enables native CPU optimisation for a local release build. The executable is `target/release/syspilot`.
+Use `cargo build --release` for a release build. The executable is `target/release/syspilot`.
 
 ## Code map
 

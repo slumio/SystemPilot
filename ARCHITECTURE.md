@@ -49,7 +49,7 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
-`./build_rust.sh` enables local CPU-specific optimization. Use plain Cargo release builds for portable binaries.
+Use `cargo build --release` to create the release binary at `target/release/syspilot`.
 
 ## Security and permissions
 

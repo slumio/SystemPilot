@@ -20,7 +20,7 @@ This document describes the behavior implemented in this repository. It does not
 - [Why SysPilot](#why-syspilot)
 - [What is available](#what-is-available)
 - [Requirements](#requirements)
-- [Build and first run](#build-and-first-run)
+- [Quick start](#quick-start)
 - [AI setup](#ai-setup)
 - [Diagnostics and RCA](#diagnostics-and-rca)
 - [Daemon and monitor](#daemon-and-monitor)
@@ -63,15 +63,17 @@ This document describes the behavior implemented in this repository. It does not
 | `perf` | Deep profiling where supported | Profile data can be limited or unavailable. |
 | systemd | Service management | Use the provided unit only on systemd hosts. |
 
-## Install and first run
+## Quick start
 
 ### Recommended: install with Cargo
 
 ```bash
-git clone https://github.com/slumio/g.git
+git clone https://github.com/slumio/SystemPilot.git syspilot
 cd syspilot
 cargo install --path .
 syspilot setup
+syspilot status
+syspilot ask "Why is Linux load average high?"
 ```
 
 `setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
@@ -83,7 +85,7 @@ cargo build --release
 ./target/release/syspilot setup
 ```
 
-Use `cargo build --release` for a portable binary. `./build_rust.sh` is an alternative local build helper that enables `target-cpu=native`.
+Use `cargo build --release` for a portable release binary.
 
 ### Individual installation actions
 

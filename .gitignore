@@ -1,12 +1,13 @@
-# C++ Build Artifacts
+# Build artifacts
 syspilot
 *.o
 *.obj
 *.out
 build/
+.xmake/
+.kiro/
 # Rust Legacy Build Artifacts
 /target/
-Cargo.lock
 **/*.rs.bk
 
 # Local Configuration and Logs
@@ -30,3 +31,7 @@ mock_backup
 
 # OS files
 .DS_Store
+
+# Legacy demo output
+language_server
+mock_db
