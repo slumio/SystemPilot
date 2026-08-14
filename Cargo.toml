@@ -18,6 +18,7 @@ include = [
     "/Cargo.lock",
     "/build.rs",
     "/README.md",
+    "/install.sh",
     "/LICENSE",
     "/CHANGELOG.md",
     "/SECURITY.md",

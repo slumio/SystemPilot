@@ -65,22 +65,30 @@ This document describes the behavior implemented in this repository. It does not
 
 ## Quick start
 
-### Recommended: install with Cargo
+### One-command install
 
 ```bash
-git clone https://github.com/slumio/SystemPilot.git syspilot
-cd syspilot
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/slumio/SystemPilot/dev/install.sh | sh
 syspilot setup
 syspilot status
 syspilot ask "Why is Linux load average high?"
 ```
 
+The installer requires Linux, `curl`, `tar`, and a Rust toolchain with Cargo. It downloads the source archive over HTTPS and installs with the committed lockfile. Review [install.sh](install.sh) before piping it to a shell.
+
 `setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
+
+Install a specific tag by setting `SYSPILOT_REF`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/slumio/SystemPilot/dev/install.sh | SYSPILOT_REF=v0.1.0 sh
+```
 
 ### Build from source instead
 
 ```bash
+git clone https://github.com/slumio/SystemPilot.git syspilot
+cd syspilot
 cargo build --release
 ./target/release/syspilot setup
 ```
