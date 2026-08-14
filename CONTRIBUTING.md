@@ -11,7 +11,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Use `./build_rust.sh` when you need the locally optimised release binary. It writes the executable to `target/release/syspilot`.
+Use `cargo build --release` when you need a release binary. It writes the executable to `target/release/syspilot`.
 
 ## Code conventions
 

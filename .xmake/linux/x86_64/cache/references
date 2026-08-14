@@ -1,7 +1,0 @@
-{
-    packages = {
-        "/home/joyboy/.xmake/packages/l/libcurl/8.21.0/cbe3939eb8a84e359a111967cdb1018d",
-        "/home/joyboy/.xmake/packages/n/ninja/v1.13.2/0a9451759a4647b5923438b464085dd6",
-        "/home/joyboy/.xmake/packages/c/cmake/4.2.3/e71a3c9d8ba0426bac589c2c548be58b"
-    }
-}

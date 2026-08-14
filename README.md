@@ -20,7 +20,7 @@ This document describes the behavior implemented in this repository. It does not
 - [Why SysPilot](#why-syspilot)
 - [What is available](#what-is-available)
 - [Requirements](#requirements)
-- [Build and first run](#build-and-first-run)
+- [Quick start](#quick-start)
 - [AI setup](#ai-setup)
 - [Diagnostics and RCA](#diagnostics-and-rca)
 - [Daemon and monitor](#daemon-and-monitor)
@@ -68,7 +68,7 @@ This document describes the behavior implemented in this repository. It does not
 ### Recommended: install with Cargo
 
 ```bash
-git clone https://github.com/slumio/SystemPilot.git
+git clone https://github.com/slumio/SystemPilot.git syspilot
 cd syspilot
 cargo install --path .
 syspilot setup
