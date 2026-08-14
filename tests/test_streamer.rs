@@ -102,6 +102,20 @@ fn plain_text_passes_through() {
 }
 
 #[test]
+fn unicode_box_drawing_passes_through_without_panicking() {
+    let out = capture_streamer_output(&["└── PID `2006` (`systemd --user`)"]);
+    assert!(out.contains("└── PID"));
+    assert!(out.contains("systemd --user"));
+}
+
+#[test]
+fn multibyte_unicode_survives_chunked_streaming() {
+    let full = capture_streamer_output(&["Process → healthy ✅"]);
+    let chunked = capture_streamer_output(&["Process ", "→ healthy ", "✅"]);
+    assert_eq!(full, chunked);
+}
+
+#[test]
 fn newline_in_input_appears_in_output() {
     let out = capture_streamer_output(&["line1\nline2"]);
     assert!(out.contains("line1"), "line1 should appear");
