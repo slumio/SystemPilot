@@ -183,18 +183,40 @@ fn netlink_listener(
     let nlmsg_len: u32 = 40;
     sub_buf[0..4].copy_from_slice(&nlmsg_len.to_ne_bytes());
     sub_buf[4..6].copy_from_slice(&(3u16).to_ne_bytes()); // NLMSG_DONE
-                                                          // cn_msg starts at offset 16: id.idx=CN_IDX_PROC(1), id.val=CN_VAL_PROC(1), len=4
+    sub_buf[12..16].copy_from_slice(&(unsafe { getpid() } as u32).to_ne_bytes());
+    // cn_msg starts at offset 16: id.idx=CN_IDX_PROC(1), id.val=CN_VAL_PROC(1), len=4
     sub_buf[16..20].copy_from_slice(&(1u32).to_ne_bytes()); // idx
     sub_buf[20..24].copy_from_slice(&(1u32).to_ne_bytes()); // val
     sub_buf[28..30].copy_from_slice(&(4u16).to_ne_bytes()); // len of data
                                                             // data = PROC_CN_MCAST_LISTEN = 1
     sub_buf[36..40].copy_from_slice(&(1u32).to_ne_bytes());
 
-    unsafe { send(nl_fd, sub_buf.as_ptr() as *const c_void, sub_buf.len(), 0) };
+    let mut kernel_addr: sockaddr_nl = unsafe { std::mem::zeroed() };
+    kernel_addr.nl_family = AF_NETLINK as u16;
+    let sent = unsafe {
+        sendto(
+            nl_fd,
+            sub_buf.as_ptr() as *const c_void,
+            sub_buf.len(),
+            0,
+            &kernel_addr as *const _ as *const sockaddr,
+            std::mem::size_of_val(&kernel_addr) as u32,
+        )
+    };
+    if sent != sub_buf.len() as isize {
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(
+            "[daemon] Netlink Process Connector subscription failed: {}; serving the initial /proc snapshot without live events.",
+            error
+        );
+        unsafe { close(nl_fd) };
+        return;
+    }
 
-    tracing::info!("[daemon] Netlink Process Connector active (zero-polling)");
+    tracing::info!("[daemon] Netlink Process Connector subscription requested");
 
     let mut recv_buf = [0u8; 8192];
+    let mut connector_confirmed = false;
 
     while running.load(Ordering::Relaxed) {
         let len = unsafe {
@@ -227,9 +249,30 @@ fn netlink_listener(
                     .try_into()
                     .unwrap_or([0; 2]),
             );
-            // NLMSG_ERROR = 2
+            // NLMSG_ERROR = 2; the kernel can reject subscription
+            // asynchronously even when sendto itself succeeded.
             if msg_type == 2 {
-                break;
+                let error_code = if msg_len >= 20 {
+                    i32::from_ne_bytes(
+                        recv_buf[offset + 16..offset + 20]
+                            .try_into()
+                            .unwrap_or([0; 4]),
+                    )
+                } else {
+                    -libc::EPROTO
+                };
+                if error_code != 0 {
+                    let error = std::io::Error::from_raw_os_error(-error_code);
+                    tracing::warn!(
+                        "[daemon] Netlink Process Connector rejected the subscription: {}. Grant cap_net_admin to the binary or run the packaged system service.",
+                        error
+                    );
+                    unsafe { close(nl_fd) };
+                    return;
+                }
+                let aligned = (msg_len + 3) & !3;
+                offset += aligned.max(16);
+                continue;
             }
 
             // cn_msg at nlmsghdr + NLMSG_HDRLEN(16)
@@ -250,6 +293,10 @@ fn netlink_listener(
 
             // CN_IDX_PROC=1, CN_VAL_PROC=1
             if cn_idx == 1 && cn_val == 1 {
+                if !connector_confirmed {
+                    tracing::info!("[daemon] Netlink Process Connector active (zero-polling)");
+                    connector_confirmed = true;
+                }
                 // proc_event starts at cn_msg + 20 bytes (after header)
                 let ev_offset = cn_offset + 20;
                 if ev_offset + 4 <= len as usize {
@@ -258,18 +305,19 @@ fn netlink_listener(
                             .try_into()
                             .unwrap_or([0; 4]),
                     );
-                    // PROC_EVENT_FORK=1, PROC_EVENT_EXEC=2, PROC_EVENT_EXIT=4
+                    // The proc_event union begins at +16 after what/cpu/timestamp.
+                    // Linux values: FORK=1, EXEC=2, EXIT=0x80000000.
                     match what {
                         1
-                            // fork: child_pid at offset +16, parent_pid at +8
-                            if ev_offset + 24 <= len as usize => {
+                            // fork: parent_pid at union +0, child_pid at union +8
+                            if ev_offset + 32 <= len as usize => {
                                 let parent = i32::from_ne_bytes(
-                                    recv_buf[ev_offset + 8..ev_offset + 12]
+                                    recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()
                                         .unwrap_or([0; 4]),
                                 );
                                 let child = i32::from_ne_bytes(
-                                    recv_buf[ev_offset + 16..ev_offset + 20]
+                                    recv_buf[ev_offset + 24..ev_offset + 28]
                                         .try_into()
                                         .unwrap_or([0; 4]),
                                 );
@@ -297,9 +345,9 @@ fn netlink_listener(
                             }
                         2
                             // exec
-                            if ev_offset + 8 <= len as usize => {
+                            if ev_offset + 24 <= len as usize => {
                                 let pid = i32::from_ne_bytes(
-                                    recv_buf[ev_offset + 4..ev_offset + 8]
+                                    recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()
                                         .unwrap_or([0; 4]),
                                 );
@@ -324,11 +372,11 @@ fn netlink_listener(
                                 };
                                 record_event(&events, &publisher, &alerts, event);
                             }
-                        4
+                        0x8000_0000
                             // exit
                             if ev_offset + 32 <= len as usize => {
                                 let pid = i32::from_ne_bytes(
-                                    recv_buf[ev_offset + 4..ev_offset + 8]
+                                    recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()
                                         .unwrap_or([0; 4]),
                                 );

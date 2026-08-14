@@ -230,6 +230,15 @@ Start the daemon in a dedicated terminal or under a service manager:
 
 The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket. User installs use the UID-scoped Linux abstract socket `@syspilot-UID`, which leaves no stale socket file. The packaged system service uses `/run/syspilot/syspilot.sock` for group-based access control. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
 
+Modern kernels require `CAP_NET_ADMIN` for Process Connector events. For a user-local binary, grant only that capability and restart the daemon:
+
+```bash
+sudo setcap cap_net_admin=ep "$(command -v syspilot)"
+syspilot daemon
+```
+
+If the binary is replaced during an upgrade, apply `setcap` again. Packaged deployments should use the system service instead.
+
 In another terminal:
 
 ```bash
