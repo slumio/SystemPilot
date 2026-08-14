@@ -1,6 +1,9 @@
 use crate::distributed::DistributedTelemetryConfig;
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+use std::io;
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +136,38 @@ pub fn daemon_runtime_dir() -> PathBuf {
 
 pub fn daemon_socket_path() -> PathBuf {
     daemon_runtime_dir().join("syspilot.sock")
+}
+
+/// User daemons use the Linux abstract namespace, avoiding stale files and
+/// filesystem races. Explicit/system runtime directories retain pathname
+/// sockets so packaged deployments can enforce group permissions.
+pub fn daemon_socket_is_abstract() -> bool {
+    std::env::var_os("SYSPILOT_RUNTIME_DIR")
+        .filter(|path| !path.is_empty())
+        .is_none()
+        && !PathBuf::from("/run/syspilot").is_dir()
+}
+
+pub fn daemon_socket_addr() -> io::Result<SocketAddr> {
+    if daemon_socket_is_abstract() {
+        SocketAddr::from_abstract_name(
+            format!("syspilot-{}", unsafe { libc::geteuid() }).as_bytes(),
+        )
+    } else {
+        SocketAddr::from_pathname(daemon_socket_path())
+    }
+}
+
+pub fn daemon_socket_label() -> String {
+    if daemon_socket_is_abstract() {
+        format!("@syspilot-{}", unsafe { libc::geteuid() })
+    } else {
+        daemon_socket_path().display().to_string()
+    }
+}
+
+pub fn connect_daemon() -> io::Result<UnixStream> {
+    UnixStream::connect_addr(&daemon_socket_addr()?)
 }
 
 pub fn daemon_health_path() -> PathBuf {

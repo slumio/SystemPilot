@@ -10,7 +10,6 @@ use causal_engine::CausalGraph;
 
 use std::fs;
 use std::io::{BufRead, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 use ui::streamer::MdStreamer;
 
@@ -73,7 +72,7 @@ fn tail_session(max_lines: usize) -> String {
 }
 
 fn request_daemon_events() -> Result<String, String> {
-    let mut stream = UnixStream::connect(crate::config::daemon_socket_path())
+    let mut stream = crate::config::connect_daemon()
         .map_err(|error| format!("could not connect to the daemon: {error}"))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(750)))

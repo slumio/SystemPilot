@@ -78,11 +78,7 @@ The installer requires Linux, `curl`, `tar`, and a Rust toolchain with Cargo. It
 
 `setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
 
-Install a specific tag by setting `SYSPILOT_REF`:
-
-```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/slumio/SystemPilot/dev/install.sh | SYSPILOT_REF=v0.1.0 sh
-```
+`SYSPILOT_REF` can select an existing branch or release tag. The project does not currently publish a `v0.1.0` tag, so use the default command above.
 
 ### Build from source instead
 
@@ -232,7 +228,7 @@ Start the daemon in a dedicated terminal or under a service manager:
 ./target/release/syspilot daemon
 ```
 
-The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket. User installs use `$XDG_RUNTIME_DIR/syspilot/syspilot.sock` (with a UID-scoped `/tmp` fallback); the packaged system service uses `/run/syspilot/syspilot.sock`. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
+The daemon performs an initial procfs scan, attempts to subscribe to the Linux Netlink Process Connector, and serves a local UNIX socket. User installs use the UID-scoped Linux abstract socket `@syspilot-UID`, which leaves no stale socket file. The packaged system service uses `/run/syspilot/syspilot.sock` for group-based access control. If Netlink subscription fails, it logs the problem and continues with the initial snapshot; it will not receive live lifecycle events.
 
 In another terminal:
 

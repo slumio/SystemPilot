@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::telemetry;
@@ -98,7 +97,7 @@ impl CausalGraph {
 // ── Daemon query ──────────────────────────────────────────────────────────────
 
 fn query_daemon() -> Option<String> {
-    let mut stream = UnixStream::connect(crate::config::daemon_socket_path()).ok()?;
+    let mut stream = crate::config::connect_daemon().ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok()?;

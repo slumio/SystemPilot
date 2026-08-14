@@ -34,6 +34,23 @@ pub fn user_binary_path() -> Result<PathBuf, String> {
     Ok(home.join(".local").join("bin").join("syspilot"))
 }
 
+fn replace_binary(source: &std::path::Path, destination: &std::path::Path) -> io::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".syspilot-install-{}", std::process::id()));
+    let result = (|| {
+        fs::copy(source, &temporary)?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&temporary, destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 pub fn install_user_binary(force: bool) -> bool {
     let destination = match user_binary_path() {
         Ok(path) => path,
@@ -56,21 +73,11 @@ pub fn install_user_binary(force: bool) -> bool {
             return false;
         }
     };
-    if let Some(parent) = destination.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            eprintln!("❌ Could not create {}: {error}", parent.display());
-            return false;
-        }
-    }
-    if let Err(error) = fs::copy(&source, &destination) {
+    if let Err(error) = replace_binary(&source, &destination) {
         eprintln!(
-            "❌ Could not copy binary to {}: {error}",
+            "❌ Could not install binary at {}: {error}",
             destination.display()
         );
-        return false;
-    }
-    if let Err(error) = fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)) {
-        eprintln!("❌ Could not set executable permissions: {error}");
         return false;
     }
     println!("✅ Installed binary at {}", destination.display());
@@ -84,6 +91,29 @@ pub fn install_user_binary(force: bool) -> bool {
         println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_binary;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn atomically_replaces_an_existing_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("bin").join("syspilot");
+        fs::write(&source, b"new binary").unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"old binary").unwrap();
+        replace_binary(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new binary");
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
 }
 
 pub fn remove_user_binary() -> bool {

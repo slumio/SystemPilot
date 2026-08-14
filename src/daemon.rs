@@ -69,12 +69,17 @@ fn now_ns() -> u64 {
 
 fn write_health(state: &str) {
     let health_path = crate::config::daemon_health_path();
-    let socket_path = crate::config::daemon_socket_path();
+    if let Some(parent) = health_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!("[daemon] could not create health directory: {}", error);
+            return;
+        }
+    }
     let document = serde_json::json!({
         "state": state,
         "pid": std::process::id(),
         "heartbeat_unix_nanos": now_ns(),
-        "socket_path": socket_path,
+        "socket": crate::config::daemon_socket_label(),
     });
     let temporary = health_path.with_extension("tmp");
     if let Err(error) = std::fs::write(&temporary, document.to_string())
@@ -492,24 +497,35 @@ fn unix_socket_server(
         return;
     }
     let socket_path = crate::config::daemon_socket_path();
-    let _ = std::fs::remove_file(&socket_path);
+    if !crate::config::daemon_socket_is_abstract() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
 
-    let listener = match UnixListener::bind(&socket_path) {
+    let socket_addr = match crate::config::daemon_socket_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            tracing::error!("[daemon] invalid socket address: {}", error);
+            return;
+        }
+    };
+    let listener = match UnixListener::bind_addr(&socket_addr) {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("[daemon] bind failed: {}", e);
             return;
         }
     };
-    let _ = std::fs::set_permissions(
-        &socket_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o660),
-    );
+    if !crate::config::daemon_socket_is_abstract() {
+        let _ = std::fs::set_permissions(
+            &socket_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o660),
+        );
+    }
 
     listener.set_nonblocking(false).ok();
     tracing::info!(
         "[daemon] UNIX socket listening at {}",
-        socket_path.display()
+        crate::config::daemon_socket_label()
     );
 
     let active = Arc::new(AtomicI32::new(0));
@@ -546,7 +562,9 @@ fn unix_socket_server(
         }
     }
 
-    let _ = std::fs::remove_file(&socket_path);
+    if !crate::config::daemon_socket_is_abstract() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
     write_health("stopped");
 }
 
