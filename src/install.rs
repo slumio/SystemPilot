@@ -93,29 +93,6 @@ pub fn install_user_binary(force: bool) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::replace_binary;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn atomically_replaces_an_existing_binary() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source");
-        let destination = directory.path().join("bin").join("syspilot");
-        fs::write(&source, b"new binary").unwrap();
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::write(&destination, b"old binary").unwrap();
-        replace_binary(&source, &destination).unwrap();
-        assert_eq!(fs::read(&destination).unwrap(), b"new binary");
-        assert_eq!(
-            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-    }
-}
-
 pub fn remove_user_binary() -> bool {
     let destination = match user_binary_path() {
         Ok(path) => path,
@@ -286,4 +263,27 @@ pub fn status() -> bool {
         ),
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_binary;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn atomically_replaces_an_existing_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("bin").join("syspilot");
+        fs::write(&source, b"new binary").unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"old binary").unwrap();
+        replace_binary(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new binary");
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
 }
