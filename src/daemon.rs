@@ -99,6 +99,21 @@ fn write_health(state: &str, publisher: &TelemetryPublisher) {
     }
 }
 
+fn publish_cloud_health(state: &str, publisher: &TelemetryPublisher) {
+    let payload = serde_json::json!({
+        "state": state,
+        "agent_version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": crate::distributed::TELEMETRY_SCHEMA_VERSION,
+        "netlink_state": match NETLINK_STATE.load(Ordering::Relaxed) { 1 => "active", 2 => "degraded", _ => "starting" },
+        "dropped_events": DROPPED_EVENTS.load(Ordering::Relaxed),
+        "response_write_failures": RESPONSE_WRITE_FAILURES.load(Ordering::Relaxed),
+        "exporter": publisher.health(),
+    });
+    if let Err(error) = publisher.publish(TelemetryKind::Health, &payload) {
+        tracing::warn!("[telemetry] cloud health heartbeat was not persisted: {error}");
+    }
+}
+
 fn describe_exit_status(status: i32) -> String {
     let signal = status & 0x7f;
     if signal != 0 {
@@ -639,11 +654,16 @@ fn unix_socket_server(
     let active = Arc::new(AtomicI32::new(0));
     const MAX_CLIENTS: i32 = 32;
     let mut last_heartbeat = Instant::now() - Duration::from_secs(2);
+    let mut last_cloud_heartbeat = Instant::now();
 
     while running.load(Ordering::Relaxed) {
         if last_heartbeat.elapsed() >= Duration::from_secs(1) {
             write_health("ready", &publisher);
             last_heartbeat = Instant::now();
+        }
+        if last_cloud_heartbeat.elapsed() >= Duration::from_secs(60) {
+            publish_cloud_health("ready", &publisher);
+            last_cloud_heartbeat = Instant::now();
         }
         // Use select-like timeout via accept with a 1s deadline
         match listener.accept() {
@@ -707,6 +727,7 @@ pub fn run_daemon(config: crate::config::Config) -> i32 {
 
     tracing::info!("✨ SysPilot Daemon starting");
     write_health("starting", &publisher);
+    publish_cloud_health("starting", &publisher);
 
     let tree: Arc<DashMap<i32, ProcessNode>> = Arc::new(DashMap::new());
     scan_proc(&tree);

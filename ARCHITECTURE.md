@@ -18,7 +18,7 @@ flowchart TD
     Dev --> Container[Docker or CI container]
 ```
 
-Use the native binary for host diagnostics. Containers are appropriate for builds, tests, and the future collector API, but a containerized agent needs host PID visibility and elevated capabilities and therefore has a weaker security boundary.
+Use the native binary for host diagnostics. Containers are appropriate for builds, tests, and the cloud collector API, but a containerized agent needs host PID visibility and elevated capabilities and therefore has a weaker security boundary.
 
 ## Local runtime flow
 

@@ -42,7 +42,7 @@ This document describes the behavior implemented in this repository. It does not
 | AI RCA | Streams analysis from Gemini, Ollama, or the configured SysPilot API. | A selected provider plus its valid credentials or local service. |
 | Daemon | Subscribes to Netlink process lifecycle events and serves local process/event data. | Linux kernel support for the Process Connector. |
 | Distributed telemetry | POSTs batches of lifecycle and matching alert envelopes to your HTTP collector. | An HTTPS/HTTP endpoint, node ID, and optional bearer token. |
-| Process alerts | Emits a `process_alert` telemetry envelope for matching process names. | Alert rules. This does not send email, Slack, PagerDuty, or kill processes. |
+| Process alerts | Emits a `process_alert` telemetry envelope for matching process names; the AWS notification worker can deliver configured email/webhook notifications. | Alert rules and an enabled cloud destination. This never kills processes. |
 
 ## Requirements
 
@@ -341,7 +341,7 @@ reused outside the loopback-only development stack.
 
 Each envelope contains `schema_version`, `message_id`, `node_id`, monotonically increasing `sequence`, `observed_at_unix_nanos`, `kind`, `payload`, and optional `attributes`.
 
-The collector must accept a JSON array of these envelopes and return an HTTP success status. SysPilot currently emits `process_lifecycle` and `process_alert` from the daemon. The schema also reserves other kinds for future use; they are not emitted by the current daemon.
+The collector accepts a JSON array of these envelopes and returns a typed acknowledgement. The daemon emits `process_lifecycle`, `process_alert`, and a low-frequency `health` heartbeat. The schema reserves other kinds for explicit diagnostic exports; they are not emitted continuously.
 
 ### Full telemetry configuration
 

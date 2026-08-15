@@ -281,10 +281,11 @@ jobs:
           conflict=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$conflict_payload" http://127.0.0.1:18080/v1/telemetry)
           test "$(printf '%s' "$conflict" | jq -r '.rejected_records[0].reason')" = sequence_conflict
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.telemetry_messages')" = 1
-          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 1
+          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 0
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.active_server_days')" = 1
           alert_payload='[{"schema_version":1,"message_id":"alert-one","node_id":"node-one","sequence":2,"observed_at_unix_nanos":2,"kind":"process_alert","payload":{"instance_id":"alert-instance","state":"firing","previous_state":null,"rule_id":"postgres-exit","process_name":"postgres","pid":12,"ppid":1,"event_type":"EXIT","observed_at_unix_nanos":2,"labels":{"severity":"high"}},"attributes":{}}]'
           curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$alert_payload" http://127.0.0.1:18080/v1/telemetry >/dev/null
+          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 1
           test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.notification_deliveries WHERE alert_instance_id='alert-instance'")" = 1
           delivery=$(PGPASSWORD=notifier-test psql -h localhost -U syspilot_notifier -d syspilot -tAc "SELECT delivery_id FROM syspilot_control.lease_notification_delivery() LIMIT 1")
           test -n "$delivery"

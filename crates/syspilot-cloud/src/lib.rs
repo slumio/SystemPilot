@@ -443,16 +443,18 @@ async fn insert_envelope(
         if record.kind == TelemetryKind::ProcessAlert {
             materialize_alert(transaction, tenant_id, record).await?;
         }
-        sqlx::query(
-            "INSERT INTO syspilot_control.reasoning_jobs(tenant_id,node_id,message_id)
-             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-        )
-        .bind(tenant_id)
-        .bind(&record.node_id)
-        .bind(&record.message_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(database_error)?;
+        if record.kind != TelemetryKind::Health {
+            sqlx::query(
+                "INSERT INTO syspilot_control.reasoning_jobs(tenant_id,node_id,message_id)
+                 VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            )
+            .bind(tenant_id)
+            .bind(&record.node_id)
+            .bind(&record.message_id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(database_error)?;
+        }
         return Ok(InsertOutcome::Accepted);
     }
     let replay = sqlx::query_scalar::<_, bool>(
