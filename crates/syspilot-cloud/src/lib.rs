@@ -11,11 +11,12 @@ use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     env,
     net::SocketAddr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -23,7 +24,7 @@ use syspilot::distributed::{
     IngestionAcknowledgement, ProcessAlert, RejectedRecord, TelemetryEnvelope, TelemetryKind,
     TELEMETRY_SCHEMA_VERSION,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 #[doc(hidden)]
@@ -188,8 +189,54 @@ impl Metrics {
 struct AppState {
     config: Arc<CloudConfig>,
     pool: PgPool,
-    admission: Arc<Semaphore>,
+    admission: Arc<Admission>,
     metrics: Arc<Metrics>,
+}
+
+struct Admission {
+    global: Arc<Semaphore>,
+    identities: Mutex<HashMap<(Uuid, String), Arc<Semaphore>>>,
+    per_identity: usize,
+    max_identities: usize,
+}
+
+struct AdmissionPermit {
+    _identity: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
+}
+
+impl Admission {
+    fn new(capacity: usize) -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(capacity)),
+            identities: Mutex::new(HashMap::new()),
+            per_identity: (capacity / 4).max(1),
+            max_identities: capacity.saturating_mul(4),
+        }
+    }
+
+    fn try_acquire(&self, tenant_id: Uuid, node_id: &str) -> Option<AdmissionPermit> {
+        let key = (tenant_id, node_id.to_owned());
+        let identity = {
+            let mut identities = self.identities.lock().ok()?;
+            if !identities.contains_key(&key) && identities.len() >= self.max_identities {
+                identities.retain(|_, permits| Arc::strong_count(permits) > 1);
+            }
+            if !identities.contains_key(&key) && identities.len() >= self.max_identities {
+                return None;
+            }
+            identities
+                .entry(key)
+                .or_insert_with(|| Arc::new(Semaphore::new(self.per_identity)))
+                .clone()
+        };
+        let identity_permit = identity.try_acquire_owned().ok()?;
+        let global_permit = self.global.clone().try_acquire_owned().ok()?;
+        Some(AdmissionPermit {
+            _identity: identity_permit,
+            _global: global_permit,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -252,7 +299,7 @@ pub async fn build(config: CloudConfig) -> Result<Router, String> {
         .await
         .map_err(|error| format!("could not connect to PostgreSQL: {error}"))?;
     let state = AppState {
-        admission: Arc::new(Semaphore::new(config.concurrent_requests)),
+        admission: Arc::new(Admission::new(config.concurrent_requests)),
         config: Arc::new(config),
         pool,
         metrics: Arc::new(Metrics::default()),
@@ -290,10 +337,6 @@ async fn ingest(
     Json(batch): Json<Vec<TelemetryEnvelope>>,
 ) -> Result<Json<IngestionAcknowledgement>, ApiError> {
     state.metrics.requests.fetch_add(1, Ordering::Relaxed);
-    let _permit = state.admission.try_acquire().map_err(|_| {
-        state.metrics.saturated.fetch_add(1, Ordering::Relaxed);
-        ApiError::Saturated
-    })?;
     validate_batch(&batch)?;
     let token = bearer_token(&headers).ok_or_else(|| {
         state.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
@@ -330,6 +373,13 @@ async fn ingest(
             "every envelope node_id must match the authenticated node".into(),
         ));
     }
+    let _permit = state
+        .admission
+        .try_acquire(tenant_id, &authenticated_node)
+        .ok_or_else(|| {
+            state.metrics.saturated.fetch_add(1, Ordering::Relaxed);
+            ApiError::Saturated
+        })?;
     set_tenant(&mut transaction, tenant_id).await?;
 
     let mut accepted_message_ids = Vec::with_capacity(batch.len());
@@ -713,6 +763,32 @@ mod tests {
             envelope_digest(&original).unwrap(),
             envelope_digest(&changed).unwrap()
         );
+    }
+
+    #[test]
+    fn admission_limits_one_identity_without_starving_another() {
+        let admission = Admission::new(8);
+        let tenant = Uuid::from_u128(1);
+        let node_a: Vec<_> = (0..2)
+            .map(|_| admission.try_acquire(tenant, "node-a").unwrap())
+            .collect();
+        assert!(admission.try_acquire(tenant, "node-a").is_none());
+        let node_b = admission.try_acquire(tenant, "node-b");
+        assert!(node_b.is_some());
+        drop(node_a);
+        assert!(admission.try_acquire(tenant, "node-a").is_some());
+    }
+
+    #[test]
+    fn admission_is_tenant_scoped_and_recovers_capacity() {
+        let admission = Admission::new(4);
+        let tenant_a = Uuid::from_u128(1);
+        let tenant_b = Uuid::from_u128(2);
+        let held = admission.try_acquire(tenant_a, "shared-node").unwrap();
+        assert!(admission.try_acquire(tenant_a, "shared-node").is_none());
+        assert!(admission.try_acquire(tenant_b, "shared-node").is_some());
+        drop(held);
+        assert!(admission.try_acquire(tenant_a, "shared-node").is_some());
     }
 
     #[test]
