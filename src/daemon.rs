@@ -7,7 +7,6 @@ use crate::alert::AlertStore;
 use crate::distributed::{ProcessAlertEngine, TelemetryKind, TelemetryPublisher};
 use dashmap::DashMap;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -170,82 +169,17 @@ fn netlink_listener(
     alerts: Arc<ProcessAlertEngine>,
     alert_state: Arc<Mutex<AlertStore>>,
 ) {
-    use libc::*;
-
-    // socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR)
-    // SAFETY: `socket` receives constant Linux Netlink arguments and returns an owned descriptor.
-    let raw_fd = unsafe { socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_CONNECTOR) };
-    if raw_fd < 0 {
-        NETLINK_STATE.store(2, Ordering::Relaxed);
-        tracing::warn!("[daemon] Netlink socket failed; serving the initial /proc snapshot without live events.");
-        return;
-    }
-    // SAFETY: `raw_fd` was just returned by `socket`, is non-negative, and has no other owner.
-    let nl_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-
-    // Build sockaddr_nl
-    // SAFETY: all-zero is the kernel-defined initialization for sockaddr_nl padding/optional fields.
-    let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
-    addr.nl_family = AF_NETLINK as u16;
-    addr.nl_groups = 1; // CN_IDX_PROC bitmask
-    addr.nl_pid = std::process::id();
-
-    // SAFETY: pointers reference a live sockaddr_nl for its exact size; the descriptor is owned.
-    if unsafe {
-        bind(
-            nl_fd.as_raw_fd(),
-            &addr as *const _ as *const sockaddr,
-            std::mem::size_of_val(&addr) as u32,
-        )
-    } < 0
-    {
-        NETLINK_STATE.store(2, Ordering::Relaxed);
-        tracing::error!(
-            "[daemon] Netlink bind failed; serving the initial /proc snapshot without live events."
-        );
-        return;
-    }
-
-    // Subscribe to PROC_CN_MCAST_LISTEN
-    // We build the minimal nlmsghdr + cn_msg + proc_cn_mcast_op by hand
-    // (Rust doesn't have linux/cn_proc.h bindings, so we use raw bytes)
-    //  PROC_CN_MCAST_LISTEN = 1
-    let mut sub_buf = [0u8; 40];
-    // nlmsghdr: len=40, type=NLMSG_DONE(3), flags=0, seq=0, pid
-    let nlmsg_len: u32 = 40;
-    sub_buf[0..4].copy_from_slice(&nlmsg_len.to_ne_bytes());
-    sub_buf[4..6].copy_from_slice(&(3u16).to_ne_bytes()); // NLMSG_DONE
-    sub_buf[12..16].copy_from_slice(&std::process::id().to_ne_bytes());
-    // cn_msg starts at offset 16: id.idx=CN_IDX_PROC(1), id.val=CN_VAL_PROC(1), len=4
-    sub_buf[16..20].copy_from_slice(&(1u32).to_ne_bytes()); // idx
-    sub_buf[20..24].copy_from_slice(&(1u32).to_ne_bytes()); // val
-    sub_buf[28..30].copy_from_slice(&(4u16).to_ne_bytes()); // len of data
-                                                            // data = PROC_CN_MCAST_LISTEN = 1
-    sub_buf[36..40].copy_from_slice(&(1u32).to_ne_bytes());
-
-    // SAFETY: all-zero is the kernel-defined initialization for sockaddr_nl padding/optional fields.
-    let mut kernel_addr: sockaddr_nl = unsafe { std::mem::zeroed() };
-    kernel_addr.nl_family = AF_NETLINK as u16;
-    // SAFETY: both buffers remain live for the call and their exact lengths are supplied.
-    let sent = unsafe {
-        sendto(
-            nl_fd.as_raw_fd(),
-            sub_buf.as_ptr() as *const c_void,
-            sub_buf.len(),
-            0,
-            &kernel_addr as *const _ as *const sockaddr,
-            std::mem::size_of_val(&kernel_addr) as u32,
-        )
-    };
-    if sent != sub_buf.len() as isize {
-        NETLINK_STATE.store(2, Ordering::Relaxed);
-        let error = std::io::Error::last_os_error();
-        tracing::warn!(
-            "[daemon] Netlink Process Connector subscription failed: {}; serving the initial /proc snapshot without live events.",
+    let connector = match crate::netlink::ProcessConnector::open() {
+        Ok(connector) => connector,
+        Err(error) => {
+            NETLINK_STATE.store(2, Ordering::Relaxed);
+            tracing::warn!(
+            "[daemon] Netlink Process Connector setup failed: {}; serving the initial /proc snapshot without live events.",
             error
         );
-        return;
-    }
+            return;
+        }
+    };
 
     tracing::info!("[daemon] Netlink Process Connector subscription requested");
 
@@ -253,33 +187,24 @@ fn netlink_listener(
     let mut connector_confirmed = false;
 
     while running.load(Ordering::Relaxed) {
-        // SAFETY: recv writes at most recv_buf.len() bytes into a valid mutable buffer.
-        let len = unsafe {
-            recv(
-                nl_fd.as_raw_fd(),
-                recv_buf.as_mut_ptr() as *mut c_void,
-                recv_buf.len(),
-                0,
-            )
-        };
-        if len < 0 {
-            let err = std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or(libc::EIO);
-            if err == EINTR {
+        let len = match connector.receive(&mut recv_buf) {
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                 continue;
             }
-            NETLINK_STATE.store(2, Ordering::Relaxed);
-            break;
-        }
+            Err(_) => {
+                NETLINK_STATE.store(2, Ordering::Relaxed);
+                break;
+            }
+        };
 
         // Parse nlmsghdr chain
         let mut offset = 0usize;
-        while offset + 16 <= len as usize {
+        while offset + 16 <= len {
             let msg_len =
                 u32::from_ne_bytes(recv_buf[offset..offset + 4].try_into().unwrap_or([0; 4]))
                     as usize;
-            if msg_len < 16 || offset + msg_len > len as usize {
+            if msg_len < 16 || offset + msg_len > len {
                 break;
             }
             let msg_type = u16::from_ne_bytes(
@@ -315,7 +240,7 @@ fn netlink_listener(
 
             // cn_msg at nlmsghdr + NLMSG_HDRLEN(16)
             let cn_offset = offset + 16;
-            if cn_offset + 20 > len as usize {
+            if cn_offset + 20 > len {
                 break;
             }
             let cn_idx = u32::from_ne_bytes(
@@ -338,7 +263,7 @@ fn netlink_listener(
                 }
                 // proc_event starts at cn_msg + 20 bytes (after header)
                 let ev_offset = cn_offset + 20;
-                if ev_offset + 4 <= len as usize {
+                if ev_offset + 4 <= len {
                     let what = u32::from_ne_bytes(
                         recv_buf[ev_offset..ev_offset + 4]
                             .try_into()
@@ -349,7 +274,7 @@ fn netlink_listener(
                     match what {
                         1
                             // fork: parent_pid at union +0, child_pid at union +8
-                            if ev_offset + 32 <= len as usize => {
+                            if ev_offset + 32 <= len => {
                                 let parent = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()
@@ -384,7 +309,7 @@ fn netlink_listener(
                             }
                         2
                             // exec
-                            if ev_offset + 24 <= len as usize => {
+                            if ev_offset + 24 <= len => {
                                 let pid = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()
@@ -413,7 +338,7 @@ fn netlink_listener(
                             }
                         0x8000_0000
                             // exit
-                            if ev_offset + 32 <= len as usize => {
+                            if ev_offset + 32 <= len => {
                                 let pid = i32::from_ne_bytes(
                                     recv_buf[ev_offset + 16..ev_offset + 20]
                                         .try_into()

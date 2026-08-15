@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 // lib.rs — exposes all modules so integration tests under tests/ can use them
 // as `syspilot::module_name::...`
 
@@ -26,6 +27,7 @@ pub mod evidence;
 pub mod fleet;
 pub mod forensics;
 pub mod install;
+pub mod netlink;
 pub mod output;
 pub mod proc_snapshot;
 pub mod profiler;
