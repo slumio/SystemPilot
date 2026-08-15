@@ -136,11 +136,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.x'
       - name: Build release binary
         run: cargo build --release --locked
-      - uses: goreleaser/nfpm-action@v2
-        with:
-          version: v2.41.3
+      - name: Install pinned nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
       - name: Build Debian and RPM packages
         env:
           SYSPILOT_PACKAGE_ARCH: amd64
@@ -168,13 +170,18 @@ jobs:
         with:
           version: v3.17.2
       - name: Validate cloud development Compose model
-        run: docker compose -f compose.cloud-dev.yml config --quiet
+        run: |
+          export SYSPILOT_DEV_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          export SYSPILOT_DEV_RUNTIME_PASSWORD="$(openssl rand -hex 24)"
+          export SYSPILOT_DEV_PEPPER="$(openssl rand -hex 32)"
+          export SYSPILOT_DEV_TOKEN="spn_local.$(openssl rand -hex 24)"
+          docker compose -f compose.cloud-dev.yml config --quiet
       - name: Build hardened cloud image
         run: docker build --file Dockerfile.cloud --tag syspilot-cloud:ci .
       - name: Lint and render hardened AWS chart
         run: |
-          helm lint deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze
-          helm template syspilot deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze > /tmp/syspilot-cloud-manifests.yaml
+          helm lint deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver
+          helm template syspilot deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver > /tmp/syspilot-cloud-manifests.yaml
 
   fleet-schema:
     runs-on: ubuntu-latest
@@ -239,9 +246,9 @@ jobs:
       - name: Exercise authenticated transactional ingestion
         env:
           PGPASSWORD: migration-test
-          TEST_TOKEN: spn_test.0123456789012345678901234567890123456789
-          TEST_PEPPER: 01234567890123456789012345678901
         run: |
+          TEST_TOKEN="spn_test.$(openssl rand -hex 24)"
+          TEST_PEPPER=$(openssl rand -hex 32)
           token_hash=$(printf '%s' "$TEST_TOKEN" | openssl dgst -sha256 -hmac "$TEST_PEPPER" -binary | xxd -p -c 256)
           psql -h localhost -U postgres -d syspilot --set ON_ERROR_STOP=1 <<SQL
           INSERT INTO syspilot_control.enrollment_credentials
@@ -252,6 +259,8 @@ jobs:
           VALUES ('00000000-0000-0000-0000-000000000001','email','ops@example.test');
           CREATE ROLE syspilot_reasoner LOGIN PASSWORD 'reasoner-test';
           GRANT syspilot_cloud_worker TO syspilot_reasoner;
+          CREATE ROLE syspilot_notifier LOGIN PASSWORD 'notifier-test';
+          GRANT syspilot_notification_worker TO syspilot_notifier;
           SQL
           cargo build --locked -p syspilot-cloud
           DATABASE_URL='postgresql://syspilot_runtime:runtime-test@localhost:5432/syspilot?sslmode=disable' \
@@ -277,6 +286,11 @@ jobs:
           alert_payload='[{"schema_version":1,"message_id":"alert-one","node_id":"node-one","sequence":2,"observed_at_unix_nanos":2,"kind":"process_alert","payload":{"instance_id":"alert-instance","state":"firing","previous_state":null,"rule_id":"postgres-exit","process_name":"postgres","pid":12,"ppid":1,"event_type":"EXIT","observed_at_unix_nanos":2,"labels":{"severity":"high"}},"attributes":{}}]'
           curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$alert_payload" http://127.0.0.1:18080/v1/telemetry >/dev/null
           test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.notification_deliveries WHERE alert_instance_id='alert-instance'")" = 1
+          delivery=$(PGPASSWORD=notifier-test psql -h localhost -U syspilot_notifier -d syspilot -tAc "SELECT delivery_id FROM syspilot_control.lease_notification_delivery() LIMIT 1")
+          test -n "$delivery"
+          PGPASSWORD=notifier-test psql -h localhost -U syspilot_notifier -d syspilot --set ON_ERROR_STOP=1 \
+            --command "SELECT syspilot_control.complete_notification_delivery('00000000-0000-0000-0000-000000000001',$delivery)" >/dev/null
+          test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.notification_deliveries WHERE status='delivered'")" = 1
           leased=$(PGPASSWORD=reasoner-test psql -h localhost -U syspilot_reasoner -d syspilot -tAc "SELECT job_id FROM syspilot_control.lease_reasoning_job() LIMIT 1")
           test -n "$leased"
           PGPASSWORD=reasoner-test psql -h localhost -U syspilot_reasoner -d syspilot --set ON_ERROR_STOP=1 \

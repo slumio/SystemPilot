@@ -23,3 +23,7 @@ uuid = { version = "=1.19.0", features = ["serde"] }
 [[bin]]
 name = "syspilot-reasoning-worker"
 path = "src/bin/reasoning_worker.rs"
+
+[[bin]]
+name = "syspilot-notification-worker"
+path = "src/bin/notification_worker.rs"

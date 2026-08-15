@@ -1,0 +1,58 @@
+{{- if not .Values.reasoning.endpoint }}
+{{- fail "reasoning.endpoint must be an HTTPS AWS reasoning endpoint" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "syspilot.name" . }}-reasoning
+  labels:
+    {{- include "syspilot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reasoning
+spec:
+  replicas: {{ .Values.reasoning.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "syspilot.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: reasoning
+  template:
+    metadata:
+      labels:
+        {{- include "syspilot.labels" . | nindent 8 }}
+        app.kubernetes.io/component: reasoning
+    spec:
+      serviceAccountName: {{ include "syspilot.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reasoning
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/syspilot-reasoning-worker"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: reasoning-database-url
+            - name: SYSPILOT_AWS_REASONING_ENDPOINT
+              value: {{ .Values.reasoning.endpoint | quote }}
+            - name: SYSPILOT_AWS_REASONING_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: reasoning-token
+            - name: REASONING_POLL_MS
+              value: {{ .Values.reasoning.pollMilliseconds | quote }}
+          resources:
+            {{- toYaml .Values.reasoning.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      terminationGracePeriodSeconds: 30

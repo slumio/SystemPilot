@@ -1,0 +1,5 @@
+[allowlist]
+description = "Historical deterministic integration-only credential removed after the first cloud CI run"
+regexes = [
+  '''spn_test\.0123456789012345678901234567890123456789''',
+]

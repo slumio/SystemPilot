@@ -3,7 +3,7 @@ services:
     image: postgres:16-bookworm
     environment:
       POSTGRES_DB: syspilot
-      POSTGRES_PASSWORD: local-admin-only
+      POSTGRES_PASSWORD: ${SYSPILOT_DEV_ADMIN_PASSWORD:?set SYSPILOT_DEV_ADMIN_PASSWORD}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d syspilot"]
       interval: 2s
@@ -20,11 +20,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      FLEET_DATABASE_URL: postgresql://postgres:local-admin-only@postgres:5432/syspilot?sslmode=disable
+      FLEET_DATABASE_URL: postgresql://postgres:${SYSPILOT_DEV_ADMIN_PASSWORD:?set SYSPILOT_DEV_ADMIN_PASSWORD}@postgres:5432/syspilot?sslmode=disable
       FLEET_DB_ALLOW_INSECURE: "1"
-      PGPASSWORD: local-admin-only
-      SYSPILOT_DEV_PEPPER: 01234567890123456789012345678901
-      SYSPILOT_DEV_TOKEN: spn_local.0123456789012345678901234567890123456789
+      PGPASSWORD: ${SYSPILOT_DEV_ADMIN_PASSWORD:?set SYSPILOT_DEV_ADMIN_PASSWORD}
+      SYSPILOT_DEV_RUNTIME_PASSWORD: ${SYSPILOT_DEV_RUNTIME_PASSWORD:?set SYSPILOT_DEV_RUNTIME_PASSWORD}
+      SYSPILOT_DEV_PEPPER: ${SYSPILOT_DEV_PEPPER:?set SYSPILOT_DEV_PEPPER}
+      SYSPILOT_DEV_TOKEN: ${SYSPILOT_DEV_TOKEN:?set SYSPILOT_DEV_TOKEN}
     volumes:
       - ./deploy/fleet:/deploy/fleet:ro
     entrypoint: ["/deploy/fleet/dev-bootstrap.sh"]
@@ -39,8 +40,8 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql://syspilot_runtime:local-runtime-only@postgres:5432/syspilot?sslmode=disable
-      SYSPILOT_CREDENTIAL_PEPPER: 01234567890123456789012345678901
+      DATABASE_URL: postgresql://syspilot_runtime:${SYSPILOT_DEV_RUNTIME_PASSWORD:?set SYSPILOT_DEV_RUNTIME_PASSWORD}@postgres:5432/syspilot?sslmode=disable
+      SYSPILOT_CREDENTIAL_PEPPER: ${SYSPILOT_DEV_PEPPER:?set SYSPILOT_DEV_PEPPER}
       LISTEN_ADDR: 0.0.0.0:8080
       DATABASE_CONNECTIONS: 16
       CONCURRENT_REQUESTS: 256

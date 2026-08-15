@@ -327,11 +327,15 @@ disable local status, doctor, evidence, cases, alerts, or the TUI.
 For an isolated development deployment of the real collector and PostgreSQL:
 
 ```bash
+export SYSPILOT_DEV_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+export SYSPILOT_DEV_RUNTIME_PASSWORD="$(openssl rand -hex 24)"
+export SYSPILOT_DEV_PEPPER="$(openssl rand -hex 32)"
+export SYSPILOT_DEV_TOKEN="spn_local.$(openssl rand -hex 24)"
 docker compose -f compose.cloud-dev.yml up --build
 ```
 
-The development credential printed in `compose.cloud-dev.yml` is intentionally
-fixed and must never be used outside the loopback-only development stack.
+These credentials are development-only, remain outside Git, and must never be
+reused outside the loopback-only development stack.
 
 ### Envelope contract
 

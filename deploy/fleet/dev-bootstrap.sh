@@ -4,15 +4,23 @@ set -eu
 : "${FLEET_DATABASE_URL:?}"
 : "${SYSPILOT_DEV_PEPPER:?}"
 : "${SYSPILOT_DEV_TOKEN:?}"
+: "${SYSPILOT_DEV_RUNTIME_PASSWORD:?}"
+
+case "$SYSPILOT_DEV_RUNTIME_PASSWORD" in
+    ''|*[!A-Za-z0-9]*) printf 'development runtime password must be alphanumeric\n' >&2; exit 2 ;;
+esac
+[ "${#SYSPILOT_DEV_RUNTIME_PASSWORD}" -ge 24 ] || { printf 'development runtime password must contain at least 24 characters\n' >&2; exit 2; }
 
 /deploy/fleet/setup-db.sh
 
 psql "$FLEET_DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=1 \
-    --set pepper="$SYSPILOT_DEV_PEPPER" --set token="$SYSPILOT_DEV_TOKEN" <<'SQL'
+    --set pepper="$SYSPILOT_DEV_PEPPER" --set token="$SYSPILOT_DEV_TOKEN" \
+    --set runtime_password="$SYSPILOT_DEV_RUNTIME_PASSWORD" <<'SQL'
 DO $$ BEGIN
-    CREATE ROLE syspilot_runtime LOGIN PASSWORD 'local-runtime-only';
+    CREATE ROLE syspilot_runtime LOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+ALTER ROLE syspilot_runtime PASSWORD :'runtime_password';
 GRANT syspilot_control_app TO syspilot_runtime;
 
 INSERT INTO syspilot_control.tenants(tenant_id,name)

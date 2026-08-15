@@ -1,5 +1,5 @@
 # Build artifacts
-syspilot
+/syspilot
 *.o
 *.obj
 *.out
@@ -18,7 +18,7 @@ build/
 /tmp/syspilot_demo.pid
 
 # External Binaries and Tools
-bin/
+/bin/
 
 # Temporary / Generated Reports
 demo_report.html

@@ -9,6 +9,9 @@ pub const FLEET_SCHEMA_V1: &str = include_str!("../../../deploy/fleet/postgres/0
 /// Cloud reasoning, notification, heartbeat, and usage schema migration.
 pub const FLEET_SCHEMA_V2: &str =
     include_str!("../../../deploy/fleet/postgres/002_cloud_workloads.sql");
+/// Cloud email/webhook delivery leasing and bounded retry migration.
+pub const FLEET_SCHEMA_V3: &str =
+    include_str!("../../../deploy/fleet/postgres/003_notification_delivery.sql");
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -261,7 +264,7 @@ mod tests {
 
 #[cfg(test)]
 mod fleet_schema_tests {
-    use super::{FLEET_SCHEMA_V1, FLEET_SCHEMA_V2};
+    use super::{FLEET_SCHEMA_V1, FLEET_SCHEMA_V2, FLEET_SCHEMA_V3};
 
     #[test]
     fn every_tenant_table_has_forced_row_level_security() {
@@ -316,6 +319,7 @@ mod fleet_schema_tests {
         }
         assert!(FLEET_SCHEMA_V2.contains("SECURITY DEFINER"));
         assert!(FLEET_SCHEMA_V2.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(FLEET_SCHEMA_V3.contains("lease_notification_delivery"));
         assert!(FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text)"));
         assert!(!FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text, token"));
     }

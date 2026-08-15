@@ -36,6 +36,8 @@ Secrets or another AWS Secrets Manager integration. It must contain:
 | `credential-pepper` | Collector | Random value of at least 32 bytes, rotated through an overlap procedure. |
 | `reasoning-database-url` | Worker | TLS-enforced login only in `syspilot_cloud_worker`. |
 | `reasoning-token` | Worker | Credential for the HTTPS AWS reasoning endpoint. |
+| `notification-database-url` | Notification worker | TLS-enforced login only in `syspilot_notification_worker`. |
+| `notification-token` | Notification worker | Credential for the HTTPS AWS SES/webhook delivery endpoint. |
 
 Never place these values in Helm values, images, Git, logs, support bundles, or
 application error responses.
@@ -50,7 +52,8 @@ helm upgrade --install syspilot deploy/cloud/helm/syspilot \
   --namespace syspilot --create-namespace \
   --set image.repository=ACCOUNT.dkr.ecr.REGION.amazonaws.com/syspilot-cloud \
   --set image.tag=VERSION \
-  --set reasoning.endpoint=https://REASONING_HOST/v1/analyze
+  --set reasoning.endpoint=https://REASONING_HOST/v1/analyze \
+  --set notification.endpoint=https://NOTIFICATION_HOST/v1/deliver
 ```
 
 Terminate public TLS at ALB using ACM, restrict ingress with WAF, and permit
@@ -68,6 +71,8 @@ not create secrets, public ingress, RDS, or IAM resources implicitly.
   twenty replicas by default.
 - Reasoning workers use `FOR UPDATE SKIP LOCKED`; replicas can increase without
   leasing the same job concurrently.
+- Notification workers independently lease email/webhook deliveries and use
+  bounded retries; the AWS endpoint performs SES or outbound webhook delivery.
 - Collector saturation returns `503` and `Retry-After`. Agents retain records
   in their local spool and retry with jitter.
 

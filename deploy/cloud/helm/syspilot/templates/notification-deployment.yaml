@@ -1,0 +1,58 @@
+{{- if not .Values.notification.endpoint }}
+{{- fail "notification.endpoint must be an HTTPS AWS notification endpoint" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "syspilot.name" . }}-notification
+  labels:
+    {{- include "syspilot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: notification
+spec:
+  replicas: {{ .Values.notification.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "syspilot.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: notification
+  template:
+    metadata:
+      labels:
+        {{- include "syspilot.labels" . | nindent 8 }}
+        app.kubernetes.io/component: notification
+    spec:
+      serviceAccountName: {{ include "syspilot.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: notification
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/syspilot-notification-worker"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: notification-database-url
+            - name: SYSPILOT_AWS_NOTIFICATION_ENDPOINT
+              value: {{ .Values.notification.endpoint | quote }}
+            - name: SYSPILOT_AWS_NOTIFICATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: notification-token
+            - name: NOTIFICATION_POLL_MS
+              value: {{ .Values.notification.pollMilliseconds | quote }}
+          resources:
+            {{- toYaml .Values.notification.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      terminationGracePeriodSeconds: 30
