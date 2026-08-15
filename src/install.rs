@@ -1,4 +1,8 @@
 use crate::config;
+use crate::daemon_health::HealthSnapshotV1;
+use crate::error::AppResult;
+use crate::output::{CapabilityState, DiagnosticV1, Outcome, OutputEnvelopeV1};
+use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -326,6 +330,125 @@ pub fn status() -> bool {
         }
     }
     true
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusDataV1 {
+    pub version: String,
+    pub build_commit: String,
+    pub active_binary: Option<String>,
+    pub syspilot_home: String,
+    pub daemon_socket: String,
+    pub shell_hook_installed: bool,
+    pub shell_hook_active: bool,
+    pub user_binary_installed: bool,
+    pub active_provider: Option<String>,
+    pub active_model: Option<String>,
+    pub telemetry_enabled: Option<bool>,
+    pub daemon: Option<HealthSnapshotV1>,
+}
+
+pub fn collect_status() -> AppResult<OutputEnvelopeV1<StatusDataV1>> {
+    let dir = config::get_syspilot_dir();
+    let mut diagnostics = Vec::new();
+    let active_binary = match std::env::current_exe() {
+        Ok(path) => Some(path.display().to_string()),
+        Err(error) => {
+            diagnostics.push(DiagnosticV1 {
+                component: "active_binary".into(),
+                state: CapabilityState::Unavailable,
+                detail: error.to_string(),
+                impact: "the running binary path cannot be verified".into(),
+                recovery_command: None,
+                fallback_used: None,
+            });
+            None
+        }
+    };
+    let user_binary_installed = match user_binary_path() {
+        Ok(path) => path.exists(),
+        Err(error) => {
+            diagnostics.push(DiagnosticV1 {
+                component: "user_binary".into(),
+                state: CapabilityState::Unavailable,
+                detail: error,
+                impact: "user-local installation cannot be verified".into(),
+                recovery_command: Some("syspilot install --binary".into()),
+                fallback_used: None,
+            });
+            false
+        }
+    };
+    let (active_provider, active_model, telemetry_enabled) = match config::load_checked() {
+        Ok(cfg) => {
+            let model = match cfg.active_provider.as_str() {
+                "gemini" => cfg.gemini_model,
+                "ollama" => cfg.ollama_model,
+                "syspilot" => cfg.syspilot_model,
+                _ => "unknown".into(),
+            };
+            (
+                Some(cfg.active_provider),
+                Some(model),
+                Some(cfg.distributed_telemetry.enabled),
+            )
+        }
+        Err(error) => {
+            diagnostics.push(DiagnosticV1 {
+                component: "configuration".into(),
+                state: CapabilityState::Misconfigured,
+                detail: error.to_string(),
+                impact: "configured features cannot be trusted".into(),
+                recovery_command: Some("syspilot doctor".into()),
+                fallback_used: None,
+            });
+            (None, None, None)
+        }
+    };
+    let daemon = match crate::daemon_health::read(&config::daemon_health_path()) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            diagnostics.push(DiagnosticV1 {
+                component: "daemon".into(),
+                state: CapabilityState::Unavailable,
+                detail: error.to_string(),
+                impact: "live events are unavailable; local procfs diagnostics remain available"
+                    .into(),
+                recovery_command: Some("syspilot daemon".into()),
+                fallback_used: Some("direct procfs diagnostics".into()),
+            });
+            None
+        }
+    };
+    let outcome = if diagnostics
+        .iter()
+        .any(|item| item.state == CapabilityState::Misconfigured)
+    {
+        Outcome::Error
+    } else if diagnostics.is_empty() {
+        Outcome::Ok
+    } else {
+        Outcome::Degraded
+    };
+    OutputEnvelopeV1::new(
+        "status",
+        outcome,
+        StatusDataV1 {
+            version: env!("CARGO_PKG_VERSION").into(),
+            build_commit: env!("SYSPILOT_BUILD_COMMIT").into(),
+            active_binary,
+            syspilot_home: dir.display().to_string(),
+            daemon_socket: config::daemon_socket_label(),
+            shell_hook_installed: dir.join("syspilot.sh").exists(),
+            shell_hook_active: std::env::var("SYSPILOT_HOOK_LOADED").is_ok(),
+            user_binary_installed,
+            active_provider,
+            active_model,
+            telemetry_enabled,
+            daemon,
+        },
+        diagnostics,
+    )
 }
 
 #[cfg(test)]

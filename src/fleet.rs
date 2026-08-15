@@ -1,5 +1,7 @@
 use crate::config::Config;
+use crate::distributed::ExporterHealth;
 use crate::error::{AppError, AppResult};
+use crate::output::{CapabilityState, DiagnosticV1, Outcome, OutputEnvelopeV1};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -83,6 +85,72 @@ pub fn disable(config: &mut Config) {
     }
     config.fleet.enabled = false;
     config.fleet.credential.clear();
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetStatusV1 {
+    pub enabled: bool,
+    pub endpoint: Option<String>,
+    pub node_id: Option<String>,
+    pub policy_source: Option<String>,
+    pub upload_scope: Vec<String>,
+    pub credential_configured: bool,
+    pub delivery: Option<ExporterHealth>,
+    pub last_acknowledgement_unix_nanos: Option<u64>,
+}
+
+pub fn collect_status(config: &Config) -> AppResult<OutputEnvelopeV1<FleetStatusV1>> {
+    let mut diagnostics = Vec::new();
+    let mut delivery = None;
+    if config.fleet.enabled {
+        match crate::daemon_health::read(&crate::config::daemon_health_path()) {
+            Ok(snapshot) => delivery = Some(snapshot.health.exporter),
+            Err(error) => diagnostics.push(DiagnosticV1 {
+                component: "fleet_delivery".into(),
+                state: if error.to_string().contains("malformed") {
+                    CapabilityState::Misconfigured
+                } else {
+                    CapabilityState::Unavailable
+                },
+                detail: error.to_string(),
+                impact: "delivery progress is unavailable; local diagnostics remain available"
+                    .into(),
+                recovery_command: Some("syspilot daemon".into()),
+                fallback_used: None,
+            }),
+        }
+    }
+    let last_acknowledgement_unix_nanos = delivery
+        .and_then(|value| value.last_acknowledgement_unix_nanos)
+        .or(config.fleet.last_acknowledgement_unix_nanos);
+    let outcome = if diagnostics
+        .iter()
+        .any(|item| item.state == CapabilityState::Misconfigured)
+    {
+        Outcome::Error
+    } else if diagnostics.is_empty() {
+        Outcome::Ok
+    } else {
+        Outcome::Degraded
+    };
+    OutputEnvelopeV1::new(
+        "fleet.status",
+        outcome,
+        FleetStatusV1 {
+            enabled: config.fleet.enabled,
+            endpoint: config.fleet.enabled.then(|| config.fleet.endpoint.clone()),
+            node_id: config.fleet.enabled.then(|| config.fleet.node_id.clone()),
+            policy_source: config
+                .fleet
+                .enabled
+                .then(|| config.fleet.policy_source.clone()),
+            upload_scope: config.fleet.upload_scope.clone(),
+            credential_configured: !config.fleet.credential.is_empty(),
+            delivery,
+            last_acknowledgement_unix_nanos,
+        },
+        diagnostics,
+    )
 }
 
 pub fn print_status(config: &Config) {

@@ -15,6 +15,8 @@ pub mod completions;
 pub mod config;
 pub mod config_migration;
 pub mod daemon;
+pub mod daemon_client;
+pub mod daemon_health;
 pub mod distributed;
 pub mod doctor;
 pub mod error;

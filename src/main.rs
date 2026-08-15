@@ -2,15 +2,14 @@
 // The global mimalloc allocator is declared in lib.rs.
 
 use syspilot::{
-    ai, alert, causal_engine, codebase, completions, config, daemon, distributed, doctor, evidence,
-    fleet, install, output, profiler, support, telemetry, ui, utils,
+    ai, alert, causal_engine, codebase, completions, config, daemon, daemon_client, distributed,
+    doctor, evidence, fleet, install, output, profiler, support, telemetry, ui, utils,
 };
 
 use causal_engine::CausalGraph;
 
 use std::fs;
-use std::io::{BufRead, Read, Write};
-use std::time::Duration;
+use std::io::BufRead;
 use ui::streamer::MdStreamer;
 
 // ── Log entry ─────────────────────────────────────────────────────────────────
@@ -69,26 +68,6 @@ fn tail_session(max_lines: usize) -> String {
         0
     };
     lines[start..].join("\n")
-}
-
-fn request_daemon_events() -> Result<String, String> {
-    let mut stream = crate::config::connect_daemon()
-        .map_err(|error| format!("could not connect to the daemon: {error}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(750)))
-        .map_err(|error| format!("could not set daemon read timeout: {error}"))?;
-    stream
-        .write_all(br#"{"request":"events"}"#)
-        .map_err(|error| format!("could not request daemon events: {error}"))?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("could not read daemon events: {error}"))?;
-    if response.is_empty() {
-        Err("daemon returned an empty event response".to_string())
-    } else {
-        Ok(response)
-    }
 }
 
 fn print_help() {
@@ -187,7 +166,21 @@ fn json_value_or_exit(document: &str, context: &'static str) -> serde_json::Valu
     }
 }
 
-fn create_support_bundle_or_exit(args: &[String]) {
+fn envelope_json_or_exit<T: serde::Serialize>(
+    command: &str,
+    outcome: output::Outcome,
+    data: T,
+) -> String {
+    match output::OutputEnvelopeV1::new(command, outcome, data, Vec::new()) {
+        Ok(envelope) => json_or_exit(&envelope, command),
+        Err(error) => {
+            eprintln!("❌ Could not create {command} output: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn create_support_bundle_or_exit(args: &[String], json_requested: bool) {
     if args.get(2).map(String::as_str) != Some("bundle")
         || args.get(3).map(String::as_str) != Some("create")
         || args.len() > 5
@@ -202,14 +195,30 @@ fn create_support_bundle_or_exit(args: &[String]) {
         destination,
     ) {
         Ok(result) => {
-            println!("✅ Support bundle written to {}", result.path.display());
-            for component in &result.bundle.components {
+            let outcome = if result.bundle.complete {
+                output::Outcome::Ok
+            } else {
+                output::Outcome::Degraded
+            };
+            if json_requested {
                 println!(
-                    "{:?} {}: {}",
-                    component.state, component.name, component.detail
+                    "{}",
+                    envelope_json_or_exit(
+                        "support.bundle.create",
+                        outcome,
+                        serde_json::json!({"path": &result.path, "bundle": &result.bundle})
+                    )
                 );
+            } else {
+                println!("✅ Support bundle written to {}", result.path.display());
+                for component in &result.bundle.components {
+                    println!(
+                        "{:?} {}: {}",
+                        component.state, component.name, component.detail
+                    );
+                }
+                println!("Redacted fields: {}", result.bundle.redaction.len());
             }
-            println!("Redacted fields: {}", result.bundle.redaction.len());
             if !result.bundle.complete {
                 eprintln!("❌ Support bundle is partial; one or more components were unavailable or failed. Inspect the component records before sharing it.");
                 std::process::exit(2);
@@ -223,7 +232,9 @@ fn create_support_bundle_or_exit(args: &[String]) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let json_requested = args.iter().any(|argument| argument == "--json");
+    args.retain(|argument| argument != "--json");
     if args.len() < 2 {
         print_help();
         return;
@@ -231,6 +242,37 @@ fn main() {
     if matches!(args[1].as_str(), "version" | "--version" | "-V") {
         println!("syspilot {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if json_requested
+        && !matches!(
+            args[1].as_str(),
+            "status"
+                | "doctor"
+                | "evidence"
+                | "cases"
+                | "alerts"
+                | "config"
+                | "events"
+                | "support"
+                | "fleet"
+        )
+    {
+        eprintln!(
+            "❌ Stable JSON output is not implemented for '{}'; supported commands: doctor, evidence, cases, alerts, config telemetry show/preview",
+            args[1]
+        );
+        std::process::exit(1);
+    }
+    if json_requested
+        && args[1] == "config"
+        && !(args.get(2).map(String::as_str) == Some("telemetry")
+            && matches!(
+                args.get(3).map(String::as_str).unwrap_or("show"),
+                "show" | "preview"
+            ))
+    {
+        eprintln!("❌ Stable JSON output for this configuration action is not implemented; use config telemetry show/preview --json");
+        std::process::exit(1);
     }
     if args[1] == "completions" {
         let Some(shell) = args.get(2) else {
@@ -261,7 +303,7 @@ fn main() {
         return;
     }
     if args[1] == "support" {
-        create_support_bundle_or_exit(&args);
+        create_support_bundle_or_exit(&args, json_requested);
         return;
     }
 
@@ -289,13 +331,39 @@ fn main() {
             }
         }
         "status" => {
-            install::status();
-        }
-        "doctor" => {
-            if !doctor::run() {
-                std::process::exit(1);
+            if json_requested {
+                match install::collect_status() {
+                    Ok(report) => {
+                        println!("{}", json_or_exit(&report, "status"));
+                        if report.outcome != output::Outcome::Ok {
+                            std::process::exit(report.outcome.exit_code().into());
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("❌ Status failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                install::status();
             }
         }
+        "doctor" => match doctor::collect() {
+            Ok(report) => {
+                if json_requested {
+                    println!("{}", json_or_exit(&report, "doctor report"));
+                } else {
+                    doctor::render_human(&report);
+                }
+                if report.outcome != output::Outcome::Ok {
+                    std::process::exit(report.outcome.exit_code().into());
+                }
+            }
+            Err(error) => {
+                eprintln!("❌ Doctor failed: {error}");
+                std::process::exit(1);
+            }
+        },
         "evidence" => {
             let mut target = None;
             let mut index = 2;
@@ -313,13 +381,25 @@ fn main() {
                 Ok(bundle)
             }) {
                 Ok(bundle) => {
-                    println!("✅ Stored evidence case {}", bundle.case_id);
-                    println!(
-                        "Observations: {}  Findings: {}  Missing evidence: {}",
-                        bundle.observations.len(),
-                        bundle.findings.len(),
-                        bundle.missing_evidence.len()
-                    );
+                    let outcome = if bundle.missing_evidence.is_empty() {
+                        output::Outcome::Ok
+                    } else {
+                        output::Outcome::Degraded
+                    };
+                    if json_requested {
+                        println!("{}", envelope_json_or_exit("evidence", outcome, &bundle));
+                    } else {
+                        println!("✅ Stored evidence case {}", bundle.case_id);
+                        println!(
+                            "Observations: {}  Findings: {}  Missing evidence: {}",
+                            bundle.observations.len(),
+                            bundle.findings.len(),
+                            bundle.missing_evidence.len()
+                        );
+                    }
+                    if outcome == output::Outcome::Degraded {
+                        std::process::exit(2);
+                    }
                 }
                 Err(error) => {
                     eprintln!("❌ Could not capture evidence: {error}");
@@ -332,19 +412,37 @@ fn main() {
             let action = args.get(2).map(String::as_str).unwrap_or("");
             let outcome = match action {
                 "list" => store.list().map(|cases| {
-                    if cases.is_empty() {
-                        println!("No diagnostic cases stored.");
-                    }
-                    for case in cases {
+                    if json_requested {
                         println!(
-                            "{}  {} bytes  {} findings  captured_ns={}",
-                            case.case_id, case.bytes, case.findings, case.captured_at_unix_nanos
+                            "{}",
+                            envelope_json_or_exit("cases.list", output::Outcome::Ok, &cases)
                         );
+                    } else {
+                        if cases.is_empty() {
+                            println!("No diagnostic cases stored.");
+                        }
+                        for case in cases {
+                            println!(
+                                "{}  {} bytes  {} findings  captured_ns={}",
+                                case.case_id,
+                                case.bytes,
+                                case.findings,
+                                case.captured_at_unix_nanos
+                            );
+                        }
                     }
                 }),
-                "show" if args.len() == 4 => store
-                    .load(&args[3])
-                    .and_then(|bundle| output::pretty(&bundle).map(|json| println!("{json}"))),
+                "show" if args.len() == 4 => store.load(&args[3]).and_then(|bundle| {
+                    if json_requested {
+                        println!(
+                            "{}",
+                            envelope_json_or_exit("cases.show", output::Outcome::Ok, &bundle)
+                        );
+                    } else {
+                        println!("{}", output::pretty(&bundle)?);
+                    }
+                    Ok(())
+                }),
                 "export" if args.len() == 4 || args.len() == 5 => {
                     let destination = args
                         .get(4)
@@ -385,21 +483,60 @@ fn main() {
                     eprintln!("❌ Fleet enrollment failed: {error}");
                     std::process::exit(1);
                 }
-                println!(
-                    "✅ Fleet enrollment enabled for node {}",
-                    conf.fleet.node_id
-                );
-                println!("Restart the daemon to begin redacted hosted telemetry delivery.");
+                if json_requested {
+                    println!(
+                        "{}",
+                        envelope_json_or_exit(
+                            "fleet.enroll",
+                            output::Outcome::Ok,
+                            serde_json::json!({"enabled": true, "node_id": conf.fleet.node_id, "endpoint": conf.fleet.endpoint, "credential_configured": true})
+                        )
+                    );
+                } else {
+                    println!(
+                        "✅ Fleet enrollment enabled for node {}",
+                        conf.fleet.node_id
+                    );
+                    println!("Restart the daemon to begin redacted hosted telemetry delivery.");
+                }
             }
-            "status" if args.len() == 3 => fleet::print_status(&conf),
+            "status" if args.len() == 3 => {
+                if json_requested {
+                    match fleet::collect_status(&conf) {
+                        Ok(report) => {
+                            println!("{}", json_or_exit(&report, "fleet status"));
+                            if report.outcome != output::Outcome::Ok {
+                                std::process::exit(report.outcome.exit_code().into());
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("❌ Fleet status failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    fleet::print_status(&conf);
+                }
+            }
             "disable" if args.len() == 3 => {
                 fleet::disable(&mut conf);
                 if let Err(error) = config::save(&conf) {
                     eprintln!("❌ Could not disable fleet enrollment: {error}");
                     std::process::exit(1);
                 }
-                println!("✅ Fleet enrollment disabled and hosted credential removed.");
-                println!("Local diagnostics remain available.");
+                if json_requested {
+                    println!(
+                        "{}",
+                        envelope_json_or_exit(
+                            "fleet.disable",
+                            output::Outcome::Ok,
+                            serde_json::json!({"enabled": false, "credential_configured": false, "local_diagnostics_available": true})
+                        )
+                    );
+                } else {
+                    println!("✅ Fleet enrollment disabled and hosted credential removed.");
+                    println!("Local diagnostics remain available.");
+                }
             }
             _ => {
                 eprintln!("❌ Usage: syspilot fleet <enroll|status|disable>");
@@ -417,12 +554,13 @@ fn main() {
             };
             match action {
                 "list" if args.len() == 2 || args.len() == 3 => {
-                    match serde_json::to_string_pretty(&store.list()) {
-                        Ok(json) => println!("{json}"),
-                        Err(error) => {
-                            eprintln!("❌ Could not encode alert state: {error}");
-                            std::process::exit(1);
-                        }
+                    if json_requested {
+                        println!(
+                            "{}",
+                            envelope_json_or_exit("alerts.list", output::Outcome::Ok, store.list())
+                        );
+                    } else {
+                        println!("{}", json_or_exit(&store.list(), "alert state"));
                     }
                 }
                 "acknowledge" | "resolve" | "suppress" if args.len() == 4 => {
@@ -434,7 +572,21 @@ fn main() {
                     let detail = format!("operator action: {action}");
                     match store.set_status(&args[3], status, detail, alert::current_time_ns()) {
                         Ok(record) => {
-                            println!("✅ Alert {} is now {:?}", record.instance_id, record.status)
+                            if json_requested {
+                                println!(
+                                    "{}",
+                                    envelope_json_or_exit(
+                                        &format!("alerts.{action}"),
+                                        output::Outcome::Ok,
+                                        record
+                                    )
+                                );
+                            } else {
+                                println!(
+                                    "✅ Alert {} is now {:?}",
+                                    record.instance_id, record.status
+                                )
+                            }
                         }
                         Err(error) => {
                             eprintln!("❌ Alert transition failed: {error}");
@@ -451,11 +603,17 @@ fn main() {
         "daemon" => {
             std::process::exit(daemon::run_daemon(conf));
         }
-        "events" => match request_daemon_events() {
-            Ok(events) => match serde_json::from_str::<serde_json::Value>(&events) {
-                Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap_or(events)),
-                Err(_) => println!("{}", events),
-            },
+        "events" => match daemon_client::events() {
+            Ok(value) => {
+                if json_requested {
+                    println!(
+                        "{}",
+                        envelope_json_or_exit("events", output::Outcome::Ok, value)
+                    );
+                } else {
+                    println!("{}", json_or_exit(&value, "daemon events"));
+                }
+            }
             Err(error) => {
                 eprintln!("❌ {}. Start it with `syspilot daemon &` first.", error);
                 std::process::exit(1);
@@ -569,7 +727,18 @@ fn main() {
                             if !view.bearer_token.is_empty() {
                                 view.bearer_token = "[configured]".to_string();
                             }
-                            println!("{}", json_or_exit(&view, "telemetry configuration"));
+                            if json_requested {
+                                println!(
+                                    "{}",
+                                    envelope_json_or_exit(
+                                        "config.telemetry.show",
+                                        output::Outcome::Ok,
+                                        &view
+                                    )
+                                );
+                            } else {
+                                println!("{}", json_or_exit(&view, "telemetry configuration"));
+                            }
                         }
                         "preview" => {
                             let envelope = if let Some(target) = args.get(4) {
@@ -592,7 +761,21 @@ fn main() {
                             };
                             match envelope {
                                 Ok(envelope) => {
-                                    println!("{}", json_or_exit(&envelope, "telemetry preview"))
+                                    if json_requested {
+                                        println!(
+                                            "{}",
+                                            envelope_json_or_exit(
+                                                "config.telemetry.preview",
+                                                output::Outcome::Ok,
+                                                &envelope
+                                            )
+                                        );
+                                    } else {
+                                        println!(
+                                            "{}",
+                                            json_or_exit(&envelope, "telemetry preview")
+                                        );
+                                    }
                                 }
                                 Err(error) => {
                                     eprintln!("❌ Could not preview telemetry: {error}");
@@ -1012,9 +1195,13 @@ fn main() {
                 ctx["configured_process_alert_rules"] =
                     serde_json::to_value(&conf.distributed_telemetry.process_alert_rules)
                         .unwrap_or_default();
-                if let Ok(events) = request_daemon_events() {
-                    ctx["recent_lifecycle_events"] = serde_json::from_str(&events)
-                        .unwrap_or_else(|_| serde_json::json!({"raw": events}));
+                match daemon_client::events() {
+                    Ok(events) => ctx["recent_lifecycle_events"] = events,
+                    Err(error) => {
+                        eprintln!("⚠️  Daemon lifecycle events unavailable: {error}. Continuing with explicitly degraded local evidence.");
+                        ctx["recent_lifecycle_events_error"] =
+                            serde_json::Value::String(error.to_string());
+                    }
                 }
             }
 

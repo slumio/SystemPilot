@@ -35,6 +35,8 @@ Dependencies point inward. Domain records do not print, exit the process, initia
 | `fleet` | Enrollment consistency and operator status | Direct database access |
 | `support` | Mandatory sanitization and atomic artifact creation | Upload |
 | `daemon` | Runtime orchestration/transports | CLI configuration editing |
+| `daemon_client` | Typed local-socket requests, timeouts, and response validation | Rendering or silent procfs fallback |
+| `daemon_health` | Typed health-file decoding and freshness calculation | Rendering or zero-valued error defaults |
 | `ai`, `codebase` | Optional explanation and context | Diagnostics availability |
 | `ui` | Terminal state/rendering | Persistent domain rules |
 

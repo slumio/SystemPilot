@@ -54,3 +54,7 @@ Environment variables: `SYSPILOT_HOME` selects the data directory; `SYSPILOT_RUN
 ## Exit semantics
 
 `0` means the requested operation completed. `1` means validation, collection, encoding, storage, transport, or command usage failed. Support bundle creation uses `2` when a safe artifact was written but at least one requested component was unavailable or failed. No command automatically upgrades SysPilot, enrolls a fleet, uploads a support bundle, or executes AI-generated remediation.
+
+## Machine output contract
+
+`--json` emits `OutputEnvelopeV1` with schema version, command, generation timestamp, outcome, typed data, and diagnostics. The current stable commands are `status`, `doctor`, `evidence`, `cases list/show`, `alerts list/acknowledge/resolve/suppress`, `config telemetry show/preview`, `fleet enroll/status/disable`, `events`, and `support bundle create`. Mutation responses never contain bearer credentials. Outcomes map to exit codes `ok=0`, `error=1`, and `degraded=2`. Commands not yet migrated reject `--json` explicitly instead of emitting human text.
