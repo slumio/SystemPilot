@@ -2,6 +2,8 @@
 
 The fleet database belongs to the collector/control plane. SysPilot agents never connect to PostgreSQL and local `doctor`, evidence, TUI, alert, and case workflows remain operational without it.
 
+> **Current capacity statement:** this repository does not yet ship the production HTTP ingestion service or a fleet load-test result. The schema and agent protocol are ready for collector development, but there is currently no validated maximum server count. See the [architecture scale boundary](../ARCHITECTURE.md#current-scale-boundary).
+
 ## Scope
 
 Schema version 1 stores tenant-scoped principals and roles, node inventory and capabilities, hashed enrollment credentials, deduplicated telemetry envelopes, per-node sequence gaps, shared cases and annotations, alert lifecycle state, retention policy, deletion requests, and immutable audit events. Large evidence bundles belong in object storage; `cases.evidence_object_key` stores only the tenant-scoped reference.

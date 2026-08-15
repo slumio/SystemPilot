@@ -4,6 +4,8 @@
 
 SysPilot is a Rust command-line application for investigating Linux process activity and failed commands. It combines local procfs data, an optional Netlink daemon, a causal graph, optional profiling/tracing, codebase search, streaming AI analysis, and optional HTTP telemetry export.
 
+For a visual explanation of deployment choices, local data flow, security boundaries, and distributed telemetry, see [Architecture](ARCHITECTURE.md).
+
 ### Why SysPilot
 
 - **Evidence before inference:** it gathers process, scheduler, stack, and dependency evidence before asking an AI model for a causal hypothesis.
