@@ -11,7 +11,7 @@ fn existing_commands_and_global_json_positions_parse() {
         vec!["syspilot", "explain", "--pid", "123", "--causal"],
         vec!["syspilot", "ask", "why is load high?", "--no-index"],
         vec!["syspilot", "config", "telemetry"],
-        vec!["syspilot", "config", "set-key", "gemini", "secret"],
+        vec!["syspilot", "config", "set-key", "gemini"],
         vec!["syspilot", "cases", "export", "case-1", "/tmp/case.json"],
         vec!["syspilot", "support", "bundle", "create"],
     ];
@@ -27,4 +27,5 @@ fn invalid_and_ambiguous_usage_is_rejected() {
     assert!(Cli::try_parse_from(["syspilot", "explain", "--causal"]).is_err());
     assert!(Cli::try_parse_from(["syspilot", "unknown-command"]).is_err());
     assert!(Cli::try_parse_from(["syspilot", "install", "--force"]).is_err());
+    assert!(Cli::try_parse_from(["syspilot", "config", "set-key", "gemini", "secret"]).is_err());
 }
