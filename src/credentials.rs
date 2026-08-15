@@ -150,4 +150,21 @@ mod tests {
         assert!(CredentialResolver::resolve(&CredentialRef::File { path }).is_err());
         assert!(store_owner_secret(directory.path(), "empty", "").is_err());
     }
+
+    #[test]
+    fn credential_rotation_atomically_replaces_the_resolved_value() {
+        let directory = tempfile::tempdir().unwrap().path().join("credentials");
+        let first = store_owner_secret(&directory, "token", "first-secret").unwrap();
+        let rotated = store_owner_secret(&directory, "token", "second-secret").unwrap();
+        assert_eq!(first, rotated);
+        assert_eq!(
+            CredentialResolver::resolve(&rotated).unwrap().as_deref(),
+            Some("second-secret")
+        );
+        let CredentialRef::File { path } = rotated else {
+            panic!("expected file reference")
+        };
+        let stored = fs::read_to_string(path).unwrap();
+        assert!(!stored.contains("first-secret"));
+    }
 }

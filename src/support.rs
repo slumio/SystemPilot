@@ -275,4 +275,28 @@ mod tests {
             .unwrap()
             .contains(&directory.path().display().to_string()));
     }
+
+    #[test]
+    fn secret_key_variants_are_redacted_at_every_nesting_depth() {
+        let sentinel = "never-emit-this-secret";
+        for key in [
+            "authorization",
+            "PASSWORD",
+            "service_api_key",
+            "access_token",
+            "client_secret",
+            "db_password",
+            "worker_credential",
+        ] {
+            let mut removed = Vec::new();
+            let value = sanitize(
+                serde_json::json!({"outer": [{key: sentinel}], "safe": 7}),
+                &mut removed,
+            );
+            let encoded = serde_json::to_string(&value).unwrap();
+            assert!(!encoded.contains(sentinel), "failed to redact key {key}");
+            assert!(encoded.contains("[REDACTED]"));
+            assert_eq!(value["safe"], 7);
+        }
+    }
 }

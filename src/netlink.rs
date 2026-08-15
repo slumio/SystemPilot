@@ -191,4 +191,17 @@ mod tests {
         bytes[16..20].copy_from_slice(&(-libc::EPERM).to_ne_bytes());
         assert_eq!(parse_frames(&bytes), vec![Frame::KernelError(-libc::EPERM)]);
     }
+
+    #[test]
+    fn arbitrary_truncated_frames_never_panic_or_emit_events() {
+        for length in 0..256usize {
+            let bytes: Vec<u8> = (0..length)
+                .map(|index| (index as u8).wrapping_mul(31))
+                .collect();
+            let _ = parse_frames(&bytes);
+            for truncated in 0..length {
+                let _ = parse_frames(&bytes[..truncated]);
+            }
+        }
+    }
 }

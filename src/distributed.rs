@@ -937,4 +937,17 @@ mod acknowledgement_tests {
         };
         assert!(acknowledgement.validate(&batch()).is_err());
     }
+
+    #[test]
+    fn envelope_validation_is_total_over_boundary_values() {
+        for sequence in [0, 1, u64::MAX] {
+            for timestamp in [0, 1, u64::MAX] {
+                let mut record = batch().remove(0);
+                record.sequence = sequence;
+                record.observed_at_unix_nanos = timestamp;
+                let result = record.validate();
+                assert_eq!(result.is_ok(), timestamp != 0);
+            }
+        }
+    }
 }
