@@ -10,7 +10,7 @@ use causal_engine::CausalGraph;
 use clap::Parser;
 
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use ui::streamer::MdStreamer;
 
 // ── Log entry ─────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ fn print_help() {
           support bundle create [path]   Create an inspectable redacted local support bundle\n\
           config telemetry preview [pid/name]  Preview the redacted envelope that would leave this host\n\
           completions <bash|zsh|fish>    Print a shell completion script\n\
-          fleet enroll <https-endpoint> <node-id> [token]  Explicitly enroll in hosted fleet ingestion\n\
+          fleet enroll <https-endpoint> <node-id>  Explicitly enroll in hosted fleet ingestion (token via prompt/stdin)\n\
           fleet status                  Show enrollment, policy, scope, and acknowledgement state\n\
           fleet disable                 Disable hosted upload and clear its credential\n\
           daemon                        Start the background SysPilot netlink daemon\n\
@@ -105,10 +105,10 @@ fn print_help() {
           model <name>                  Set active model name\n\
           pull <model> [--set-active]   Pull a model using Ollama\n\
           index [--force]               Index current codebase for vector search\n\
-          config telemetry enable <endpoint> <node-id> [token]  Configure distributed export\n\
+          config telemetry enable <endpoint> <node-id>  Configure distributed export (token via prompt/stdin)\n\
           config alert add <id> <exact|prefix> <process-name>  Add process alert\n\
           config <action>               Manage settings\n\
-             set-key <provider> <key>   Set provider API key\n\
+             set-key <provider>         Set provider API key via hidden prompt/stdin\n\
              set-url <provider> <url>   Set provider API endpoint URL\n\
              set <option> <value>       Set option (chunk_strategy, embedding_model)\n\
              rollback                   Restore the immutable pre-migration configuration backup\n\
@@ -144,6 +144,32 @@ fn save_config_or_exit(config: &config::Config) {
     if let Err(error) = config::save(config) {
         eprintln!("❌ Could not save SysPilot configuration: {}", error);
         std::process::exit(1);
+    }
+}
+
+fn read_secret(label: &str, environment: &str, required: bool) -> Result<String, String> {
+    if let Some(value) = std::env::var(environment)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value);
+    }
+    let value = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("{label}: "))
+            .map_err(|error| format!("could not read credential: {error}"))?
+    } else {
+        let mut value = String::new();
+        std::io::stdin()
+            .read_line(&mut value)
+            .map_err(|error| format!("could not read credential from stdin: {error}"))?;
+        value.trim_end_matches(['\r', '\n']).to_owned()
+    };
+    if required && value.is_empty() {
+        Err(format!(
+            "a credential is required via {environment} or hidden prompt/stdin"
+        ))
+    } else {
+        Ok(value)
     }
 }
 
@@ -503,16 +529,13 @@ fn main() {
             }
         }
         "fleet" => match args.get(2).map(String::as_str).unwrap_or("") {
-            "enroll" if args.len() == 5 || args.len() == 6 => {
-                let credential = std::env::var("SYSPILOT_FLEET_TOKEN")
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| args.get(5).cloned())
-                    .unwrap_or_default();
-                if credential.is_empty() {
-                    eprintln!("❌ Set SYSPILOT_FLEET_TOKEN or provide the token argument.");
-                    std::process::exit(1);
-                }
+            "enroll" if args.len() == 5 => {
+                let credential =
+                    read_secret("Fleet enrollment token", "SYSPILOT_FLEET_TOKEN", true)
+                        .unwrap_or_else(|error| {
+                            eprintln!("❌ Fleet enrollment failed: {error}");
+                            std::process::exit(1);
+                        });
                 if let Err(error) =
                     fleet::enroll(&mut conf, args[3].clone(), args[4].clone(), credential)
                         .and_then(|_| config::save(&conf))
@@ -752,15 +775,22 @@ fn main() {
                     let action = args.get(3).map(String::as_str).unwrap_or("show");
                     match action {
                         "enable" => {
-                            if args.len() < 6 {
-                                eprintln!("❌ Usage: syspilot config telemetry enable <endpoint> <node-id> [bearer-token]");
+                            if args.len() != 6 {
+                                eprintln!("❌ Usage: syspilot config telemetry enable <endpoint> <node-id>");
                                 std::process::exit(1);
                             }
                             conf.distributed_telemetry.enabled = true;
                             conf.distributed_telemetry.endpoint = args[4].clone();
                             conf.distributed_telemetry.node_id = args[5].clone();
-                            conf.distributed_telemetry.bearer_token =
-                                args.get(6).cloned().unwrap_or_default();
+                            conf.distributed_telemetry.bearer_token = read_secret(
+                                "Telemetry bearer token (leave empty for none)",
+                                "SYSPILOT_TELEMETRY_TOKEN",
+                                false,
+                            )
+                            .unwrap_or_else(|error| {
+                                eprintln!("❌ Could not read telemetry credential: {error}");
+                                std::process::exit(1);
+                            });
                             conf.distributed_telemetry.bearer_credential =
                                 if conf.distributed_telemetry.bearer_token.is_empty() {
                                     syspilot::credentials::CredentialRef::None
@@ -930,13 +960,23 @@ fn main() {
                     }
                 }
                 "set-key" => {
-                    if args.len() < 5 {
-                        eprintln!("❌ Usage: syspilot config set-key <provider> <key>");
+                    if args.len() != 4 {
+                        eprintln!("❌ Usage: syspilot config set-key <provider>");
                         std::process::exit(1);
                     }
                     let prov = args[3].to_lowercase();
-                    let key = &args[4];
-                    if let Err(error) = config::set_provider_credential(&mut conf, &prov, key) {
+                    let environment = if prov == "gemini" {
+                        "GEMINI_API_KEY"
+                    } else {
+                        "SYSPILOT_API_KEY"
+                    };
+                    let key = read_secret("Provider API key", environment, true).unwrap_or_else(
+                        |error| {
+                            eprintln!("❌ Could not store provider credential: {error}");
+                            std::process::exit(1);
+                        },
+                    );
+                    if let Err(error) = config::set_provider_credential(&mut conf, &prov, &key) {
                         eprintln!("❌ Could not store provider credential: {error}");
                         std::process::exit(1);
                     }

@@ -120,7 +120,7 @@ fn ai_check(cfg: &config::Config) -> DiagnosticV1 {
             CapabilityState::Degraded,
             detail,
             "AI explanations are unavailable; offline diagnostics remain available",
-            Some("syspilot config set-key <provider> <key>"),
+            Some("syspilot config set-key <provider>"),
         )
     }
 }
@@ -132,7 +132,7 @@ fn export_check(cfg: &DistributedTelemetryConfig) -> DiagnosticV1 {
             CapabilityState::Available,
             "disabled by explicit default",
             "fleet delivery is inactive; local diagnostics remain available",
-            Some("syspilot config telemetry enable <endpoint> <node-id> [token]"),
+            Some("syspilot config telemetry enable <endpoint> <node-id>"),
         );
     }
     match cfg.validate() {

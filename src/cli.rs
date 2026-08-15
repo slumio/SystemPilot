@@ -123,11 +123,7 @@ pub enum Shell {
 }
 #[derive(Debug, Subcommand)]
 pub enum FleetAction {
-    Enroll {
-        endpoint: String,
-        node_id: String,
-        token: Option<String>,
-    },
+    Enroll { endpoint: String, node_id: String },
     Status,
     Disable,
 }
@@ -144,7 +140,6 @@ pub enum ConfigAction {
     },
     SetKey {
         provider: String,
-        key: String,
     },
     SetUrl {
         provider: String,
@@ -158,16 +153,10 @@ pub enum ConfigAction {
 }
 #[derive(Debug, Subcommand)]
 pub enum TelemetryAction {
-    Enable {
-        endpoint: String,
-        node_id: String,
-        token: Option<String>,
-    },
+    Enable { endpoint: String, node_id: String },
     Disable,
     Show,
-    Preview {
-        target: Option<String>,
-    },
+    Preview { target: Option<String> },
 }
 #[derive(Debug, Subcommand)]
 pub enum AlertConfigAction {

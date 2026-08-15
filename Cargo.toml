@@ -46,6 +46,7 @@ syspilot-abi = { version = "0.1.0", path = "crates/syspilot-abi", features = ["s
 
 # CLI argument parsing
 clap = { version = "4.5.4", features = ["derive"] }
+rpassword = "7.3.1"
 
 # Serialization / Deserialization
 serde = { version = "1.0.197", features = ["derive"] }
