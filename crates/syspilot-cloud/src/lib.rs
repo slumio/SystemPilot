@@ -42,6 +42,38 @@ use sqlx::{PgPool, PgPoolOptions, Postgres, Transaction};
 const MAX_BATCH: usize = 256;
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const RETRY_AFTER_SECONDS: &str = "1";
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const MIN_REASONABLE_UNIX_SECONDS: u64 = 946_684_800; // 2000-01-01T00:00:00Z
+const MAX_REASONABLE_UNIX_SECONDS: u64 = 4_102_444_799; // 2099-12-31T23:59:59Z
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnixTimestamp {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+impl UnixTimestamp {
+    fn from_nanos(value: u64) -> Result<Self, ApiError> {
+        let seconds = value / NANOS_PER_SECOND;
+        if !(MIN_REASONABLE_UNIX_SECONDS..=MAX_REASONABLE_UNIX_SECONDS).contains(&seconds) {
+            return Err(ApiError::Invalid(
+                "telemetry timestamp must be between 2000-01-01 and 2099-12-31 UTC".into(),
+            ));
+        }
+        Ok(Self {
+            seconds: i64::try_from(seconds)
+                .map_err(|_| ApiError::Invalid("telemetry timestamp overflows storage".into()))?,
+            nanoseconds: i64::try_from(value % NANOS_PER_SECOND)
+                .expect("subsecond nanoseconds always fit in i64"),
+        })
+    }
+
+    #[cfg(test)]
+    fn as_nanos(self) -> u64 {
+        u64::try_from(self.seconds).expect("validated seconds are nonnegative") * NANOS_PER_SECOND
+            + u64::try_from(self.nanoseconds).expect("validated nanoseconds are nonnegative")
+    }
+}
 
 #[derive(Clone)]
 pub struct CloudConfig {
@@ -363,6 +395,7 @@ fn validate_batch(batch: &[TelemetryEnvelope]) -> Result<(), ApiError> {
                 "schema_version must be 1 and sequence must be greater than zero".into(),
             ));
         }
+        UnixTimestamp::from_nanos(record.observed_at_unix_nanos)?;
     }
     Ok(())
 }
@@ -415,7 +448,7 @@ async fn insert_envelope(
 ) -> Result<InsertOutcome, ApiError> {
     let sequence = i64::try_from(record.sequence)
         .map_err(|_| ApiError::Invalid("sequence exceeds PostgreSQL bigint".into()))?;
-    let observed = record.observed_at_unix_nanos as f64 / 1_000_000_000.0;
+    let observed = UnixTimestamp::from_nanos(record.observed_at_unix_nanos)?;
     let envelope = serde_json::to_value(record)
         .map_err(|_| ApiError::Invalid("envelope could not be encoded".into()))?;
     let kind = serde_json::to_value(&record.kind)
@@ -425,7 +458,8 @@ async fn insert_envelope(
     let inserted = sqlx::query_scalar::<_, bool>(
         "INSERT INTO syspilot_control.telemetry_messages
          (tenant_id,node_id,message_id,sequence,schema_version,kind,observed_at,envelope)
-         VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),$8)
+         VALUES ($1,$2,$3,$4,$5,$6,
+           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',$9)
          ON CONFLICT DO NOTHING RETURNING true",
     )
     .bind(tenant_id)
@@ -434,7 +468,8 @@ async fn insert_envelope(
     .bind(sequence)
     .bind(i32::from(record.schema_version))
     .bind(kind)
-    .bind(observed)
+    .bind(observed.seconds)
+    .bind(observed.nanoseconds)
     .bind(envelope)
     .fetch_optional(&mut **transaction)
     .await
@@ -492,12 +527,13 @@ async fn materialize_alert(
             "process_alert identity or state is invalid".into(),
         ));
     }
-    let first = alert.observed_at_unix_nanos as f64 / 1_000_000_000.0;
-    let last = alert.observed_at_unix_nanos as f64 / 1_000_000_000.0;
+    let observed = UnixTimestamp::from_nanos(alert.observed_at_unix_nanos)?;
     sqlx::query(
         "INSERT INTO syspilot_control.alerts
          (tenant_id,alert_instance_id,node_id,rule_id,state,payload,first_observed_at,last_transition_at)
-         VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),to_timestamp($8))
+         VALUES ($1,$2,$3,$4,$5,$6,
+           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',
+           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond')
          ON CONFLICT (tenant_id,alert_instance_id) DO UPDATE SET
            state=EXCLUDED.state,payload=EXCLUDED.payload,last_transition_at=EXCLUDED.last_transition_at",
     )
@@ -507,8 +543,8 @@ async fn materialize_alert(
     .bind(&alert.rule_id)
     .bind(&alert.state)
     .bind(&record.payload)
-    .bind(first)
-    .bind(last)
+    .bind(observed.seconds)
+    .bind(observed.nanoseconds)
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -593,7 +629,7 @@ mod tests {
             message_id: format!("message-{sequence}"),
             node_id: "node-a".into(),
             sequence,
-            observed_at_unix_nanos: 1,
+            observed_at_unix_nanos: MIN_REASONABLE_UNIX_SECONDS * NANOS_PER_SECOND,
             kind: TelemetryKind::Health,
             payload: serde_json::json!({"healthy": true}),
             attributes: BTreeMap::new(),
@@ -606,6 +642,32 @@ mod tests {
         assert!(validate_batch(&vec![envelope(1); MAX_BATCH + 1]).is_err());
         assert!(validate_batch(&[envelope(0)]).is_err());
         assert!(validate_batch(&[envelope(1)]).is_ok());
+    }
+
+    #[test]
+    fn timestamps_preserve_integer_nanosecond_parts() {
+        for value in [
+            MIN_REASONABLE_UNIX_SECONDS * NANOS_PER_SECOND,
+            1_725_000_000_123_456_789,
+            MAX_REASONABLE_UNIX_SECONDS * NANOS_PER_SECOND + 999_999_999,
+        ] {
+            let timestamp = UnixTimestamp::from_nanos(value).unwrap();
+            assert_eq!(timestamp.as_nanos(), value);
+            assert!((0..1_000_000_000).contains(&timestamp.nanoseconds));
+        }
+    }
+
+    #[test]
+    fn timestamps_reject_zero_overflow_and_unreasonable_dates() {
+        assert!(UnixTimestamp::from_nanos(0).is_err());
+        assert!(
+            UnixTimestamp::from_nanos(MIN_REASONABLE_UNIX_SECONDS * NANOS_PER_SECOND - 1).is_err()
+        );
+        assert!(
+            UnixTimestamp::from_nanos((MAX_REASONABLE_UNIX_SECONDS + 1) * NANOS_PER_SECOND)
+                .is_err()
+        );
+        assert!(UnixTimestamp::from_nanos(u64::MAX).is_err());
     }
 
     #[test]
