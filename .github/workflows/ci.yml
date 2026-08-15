@@ -280,18 +280,21 @@ jobs:
             curl --fail --silent http://127.0.0.1:18080/health/ready && break
             sleep 1
           done
-          payload='[{"schema_version":1,"message_id":"message-one","node_id":"node-one","sequence":1,"observed_at_unix_nanos":1,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
+          payload='[{"schema_version":1,"message_id":"message-one","node_id":"node-one","sequence":1,"observed_at_unix_nanos":1725000000123456789,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
           first=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$payload" http://127.0.0.1:18080/v1/telemetry)
           test "$(printf '%s' "$first" | jq -r '.accepted_message_ids[0]')" = message-one
           replay=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$payload" http://127.0.0.1:18080/v1/telemetry)
           test "$(printf '%s' "$replay" | jq -r '.accepted_message_ids[0]')" = message-one
-          conflict_payload='[{"schema_version":1,"message_id":"message-conflict","node_id":"node-one","sequence":1,"observed_at_unix_nanos":2,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
+          replay_conflict_payload='[{"schema_version":1,"message_id":"message-one","node_id":"node-one","sequence":1,"observed_at_unix_nanos":1725000000123456789,"kind":"health","payload":{"healthy":false},"attributes":{}}]'
+          replay_conflict=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$replay_conflict_payload" http://127.0.0.1:18080/v1/telemetry)
+          test "$(printf '%s' "$replay_conflict" | jq -r '.rejected_records[0].reason')" = message_id_content_conflict
+          conflict_payload='[{"schema_version":1,"message_id":"message-conflict","node_id":"node-one","sequence":1,"observed_at_unix_nanos":1725000000123456790,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
           conflict=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$conflict_payload" http://127.0.0.1:18080/v1/telemetry)
           test "$(printf '%s' "$conflict" | jq -r '.rejected_records[0].reason')" = sequence_conflict
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.telemetry_messages')" = 1
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 0
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.active_server_days')" = 1
-          alert_payload='[{"schema_version":1,"message_id":"alert-one","node_id":"node-one","sequence":2,"observed_at_unix_nanos":2,"kind":"process_alert","payload":{"instance_id":"alert-instance","state":"firing","previous_state":null,"rule_id":"postgres-exit","process_name":"postgres","pid":12,"ppid":1,"event_type":"EXIT","observed_at_unix_nanos":2,"labels":{"severity":"high"}},"attributes":{}}]'
+          alert_payload='[{"schema_version":1,"message_id":"alert-one","node_id":"node-one","sequence":2,"observed_at_unix_nanos":1725000000123456791,"kind":"process_alert","payload":{"instance_id":"alert-instance","state":"firing","previous_state":null,"rule_id":"postgres-exit","process_name":"postgres","pid":12,"ppid":1,"event_type":"EXIT","observed_at_unix_nanos":1725000000123456791,"labels":{"severity":"high"}},"attributes":{}}]'
           curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$alert_payload" http://127.0.0.1:18080/v1/telemetry >/dev/null
           test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 1
           test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.notification_deliveries WHERE alert_instance_id='alert-instance'")" = 1

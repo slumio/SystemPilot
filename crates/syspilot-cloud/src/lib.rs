@@ -9,7 +9,7 @@ use axum::{
 };
 use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     env,
     net::SocketAddr,
@@ -346,6 +346,10 @@ async fn ingest(
                 message_id: record.message_id.clone(),
                 reason: "sequence_conflict".into(),
             }),
+            InsertOutcome::ReplayConflict => rejected_records.push(RejectedRecord {
+                message_id: record.message_id.clone(),
+                reason: "message_id_content_conflict".into(),
+            }),
         }
     }
     record_batch_state(
@@ -439,6 +443,13 @@ async fn set_tenant(
 enum InsertOutcome {
     Accepted,
     SequenceConflict,
+    ReplayConflict,
+}
+
+fn envelope_digest(record: &TelemetryEnvelope) -> Result<[u8; 32], ApiError> {
+    let canonical = serde_json::to_vec(record)
+        .map_err(|_| ApiError::Invalid("envelope could not be encoded".into()))?;
+    Ok(Sha256::digest(canonical).into())
 }
 
 async fn insert_envelope(
@@ -451,15 +462,16 @@ async fn insert_envelope(
     let observed = UnixTimestamp::from_nanos(record.observed_at_unix_nanos)?;
     let envelope = serde_json::to_value(record)
         .map_err(|_| ApiError::Invalid("envelope could not be encoded".into()))?;
+    let digest = envelope_digest(record)?;
     let kind = serde_json::to_value(&record.kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| ApiError::Invalid("telemetry kind could not be encoded".into()))?;
     let inserted = sqlx::query_scalar::<_, bool>(
         "INSERT INTO syspilot_control.telemetry_messages
-         (tenant_id,node_id,message_id,sequence,schema_version,kind,observed_at,envelope)
+         (tenant_id,node_id,message_id,sequence,schema_version,kind,observed_at,envelope,envelope_digest)
          VALUES ($1,$2,$3,$4,$5,$6,
-           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',$9)
+           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',$9,$10)
          ON CONFLICT DO NOTHING RETURNING true",
     )
     .bind(tenant_id)
@@ -470,7 +482,8 @@ async fn insert_envelope(
     .bind(kind)
     .bind(observed.seconds)
     .bind(observed.nanoseconds)
-    .bind(envelope)
+    .bind(&envelope)
+    .bind(digest.as_slice())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -492,21 +505,37 @@ async fn insert_envelope(
         }
         return Ok(InsertOutcome::Accepted);
     }
-    let replay = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM syspilot_control.telemetry_messages
-         WHERE tenant_id=$1 AND node_id=$2 AND message_id=$3)",
+    let replay = sqlx::query_as::<_, (Option<Vec<u8>>, serde_json::Value)>(
+        "SELECT envelope_digest,envelope FROM syspilot_control.telemetry_messages
+         WHERE tenant_id=$1 AND node_id=$2 AND message_id=$3",
     )
     .bind(tenant_id)
     .bind(&record.node_id)
     .bind(&record.message_id)
-    .fetch_one(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?;
-    Ok(if replay {
-        InsertOutcome::Accepted
-    } else {
-        InsertOutcome::SequenceConflict
-    })
+    match replay {
+        Some((Some(stored), _)) if stored.as_slice() == digest.as_slice() => {
+            Ok(InsertOutcome::Accepted)
+        }
+        Some((None, stored_envelope)) if stored_envelope == envelope => {
+            sqlx::query(
+                "UPDATE syspilot_control.telemetry_messages SET envelope_digest=$4
+                 WHERE tenant_id=$1 AND node_id=$2 AND message_id=$3 AND envelope_digest IS NULL",
+            )
+            .bind(tenant_id)
+            .bind(&record.node_id)
+            .bind(&record.message_id)
+            .bind(digest.as_slice())
+            .execute(&mut **transaction)
+            .await
+            .map_err(database_error)?;
+            Ok(InsertOutcome::Accepted)
+        }
+        Some(_) => Ok(InsertOutcome::ReplayConflict),
+        None => Ok(InsertOutcome::SequenceConflict),
+    }
 }
 
 async fn materialize_alert(
@@ -668,6 +697,22 @@ mod tests {
                 .is_err()
         );
         assert!(UnixTimestamp::from_nanos(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn envelope_digest_binds_replays_to_exact_content() {
+        let original = envelope(1);
+        let exact_replay = original.clone();
+        let mut changed = original.clone();
+        changed.payload = serde_json::json!({"healthy": false});
+        assert_eq!(
+            envelope_digest(&original).unwrap(),
+            envelope_digest(&exact_replay).unwrap()
+        );
+        assert_ne!(
+            envelope_digest(&original).unwrap(),
+            envelope_digest(&changed).unwrap()
+        );
     }
 
     #[test]
