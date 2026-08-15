@@ -2,8 +2,8 @@
 // The global mimalloc allocator is declared in lib.rs.
 
 use syspilot::{
-    ai, causal_engine, codebase, config, daemon, distributed, install, profiler, telemetry, ui,
-    utils,
+    ai, alert, causal_engine, codebase, completions, config, daemon, distributed, doctor, evidence,
+    fleet, install, output, profiler, support, telemetry, ui, utils,
 };
 
 use causal_engine::CausalGraph;
@@ -97,14 +97,27 @@ fn print_help() {
         Usage: syspilot <command> [options]\n\n\
         Commands:\n\
           setup                         Guided first-run setup
-\
           install                       Create local configuration and shell hook
-\
           install --binary [--force]    Copy this binary to ~/.local/bin
-\
           uninstall --binary            Remove only the user-local binary\n\
           uninstall                     Remove terminal hooks\n\
           status                        Check integration status\n\
+          doctor                        Diagnose capabilities, configuration, storage, and daemon health\n\
+          evidence [--pid <pid/name>]   Capture and store a deterministic offline evidence bundle\n\
+          cases list                    List retained diagnostic cases\n\
+          cases show <id>               Display a diagnostic case\n\
+          cases export <id> [path]      Export a case as JSON\n\
+          cases delete <id>             Delete a diagnostic case\n\
+          alerts list                   List persistent alert lifecycle state\n\
+          alerts acknowledge <id>       Acknowledge a firing alert\n\
+          alerts resolve <id>            Resolve an alert explicitly\n\
+          alerts suppress <id>           Suppress an alert\n\
+          support bundle create [path]   Create an inspectable redacted local support bundle\n\
+          config telemetry preview [pid/name]  Preview the redacted envelope that would leave this host\n\
+          completions <bash|zsh|fish>    Print a shell completion script\n\
+          fleet enroll <https-endpoint> <node-id> [token]  Explicitly enroll in hosted fleet ingestion\n\
+          fleet status                  Show enrollment, policy, scope, and acknowledgement state\n\
+          fleet disable                 Disable hosted upload and clear its credential\n\
           daemon                        Start the background SysPilot netlink daemon\n\
           events                        Show recent daemon lifecycle events and exit reasons\n\
           monitor                       Open the real-time diagnostic TUI\n\
@@ -118,6 +131,7 @@ fn print_help() {
              set-key <provider> <key>   Set provider API key\n\
              set-url <provider> <url>   Set provider API endpoint URL\n\
              set <option> <value>       Set option (chunk_strategy, embedding_model)\n\
+             rollback                   Restore the immutable pre-migration configuration backup\n\
           ask \"<question>\" [options]    Ask general tech or codebase questions\n\
              --file <path>              Provide file content context\n\
              --no-index                 Skip codebase vector search\n\
@@ -153,6 +167,61 @@ fn save_config_or_exit(config: &config::Config) {
     }
 }
 
+fn json_or_exit<T: serde::Serialize + ?Sized>(value: &T, context: &str) -> String {
+    match output::pretty(value) {
+        Ok(json) => json,
+        Err(error) => {
+            eprintln!("❌ Could not render {context}: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn json_value_or_exit(document: &str, context: &'static str) -> serde_json::Value {
+    match output::parse_value(document, context) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("❌ {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn create_support_bundle_or_exit(args: &[String]) {
+    if args.get(2).map(String::as_str) != Some("bundle")
+        || args.get(3).map(String::as_str) != Some("create")
+        || args.len() > 5
+    {
+        eprintln!("❌ Usage: syspilot support bundle create [path]");
+        std::process::exit(1);
+    }
+    let destination = args.get(4).map(std::path::Path::new);
+    match support::create(
+        &config::get_syspilot_dir(),
+        &config::daemon_health_path(),
+        destination,
+    ) {
+        Ok(result) => {
+            println!("✅ Support bundle written to {}", result.path.display());
+            for component in &result.bundle.components {
+                println!(
+                    "{:?} {}: {}",
+                    component.state, component.name, component.detail
+                );
+            }
+            println!("Redacted fields: {}", result.bundle.redaction.len());
+            if !result.bundle.complete {
+                eprintln!("❌ Support bundle is partial; one or more components were unavailable or failed. Inspect the component records before sharing it.");
+                std::process::exit(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("❌ Support bundle creation failed before a safe artifact could be written: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -161,6 +230,38 @@ fn main() {
     }
     if matches!(args[1].as_str(), "version" | "--version" | "-V") {
         println!("syspilot {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args[1] == "completions" {
+        let Some(shell) = args.get(2) else {
+            eprintln!("❌ Usage: syspilot completions <bash|zsh|fish>");
+            std::process::exit(1);
+        };
+        match completions::generate(shell) {
+            Ok(script) => print!("{script}"),
+            Err(error) => {
+                eprintln!("❌ {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if args[1] == "config" && args.get(2).map(String::as_str) == Some("rollback") {
+        match config::rollback_previous() {
+            Ok(backup) => println!(
+                "✅ Restored configuration from {}. Restart SysPilot with the compatible version.",
+                backup.display()
+            ),
+            Err(error) => {
+                eprintln!("❌ Configuration rollback failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args[1] == "support" {
+        create_support_bundle_or_exit(&args);
         return;
     }
 
@@ -189,6 +290,163 @@ fn main() {
         }
         "status" => {
             install::status();
+        }
+        "doctor" => {
+            if !doctor::run() {
+                std::process::exit(1);
+            }
+        }
+        "evidence" => {
+            let mut target = None;
+            let mut index = 2;
+            while index < args.len() {
+                if args[index] == "--pid" && index + 1 < args.len() {
+                    target = Some(args[index + 1].as_str());
+                    index += 2;
+                } else {
+                    eprintln!("❌ Usage: syspilot evidence [--pid <pid/name>]");
+                    std::process::exit(1);
+                }
+            }
+            match evidence::capture(target).and_then(|bundle| {
+                evidence::CaseStore::default().save(&bundle)?;
+                Ok(bundle)
+            }) {
+                Ok(bundle) => {
+                    println!("✅ Stored evidence case {}", bundle.case_id);
+                    println!(
+                        "Observations: {}  Findings: {}  Missing evidence: {}",
+                        bundle.observations.len(),
+                        bundle.findings.len(),
+                        bundle.missing_evidence.len()
+                    );
+                }
+                Err(error) => {
+                    eprintln!("❌ Could not capture evidence: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "cases" => {
+            let store = evidence::CaseStore::default();
+            let action = args.get(2).map(String::as_str).unwrap_or("");
+            let outcome = match action {
+                "list" => store.list().map(|cases| {
+                    if cases.is_empty() {
+                        println!("No diagnostic cases stored.");
+                    }
+                    for case in cases {
+                        println!(
+                            "{}  {} bytes  {} findings  captured_ns={}",
+                            case.case_id, case.bytes, case.findings, case.captured_at_unix_nanos
+                        );
+                    }
+                }),
+                "show" if args.len() == 4 => store
+                    .load(&args[3])
+                    .and_then(|bundle| output::pretty(&bundle).map(|json| println!("{json}"))),
+                "export" if args.len() == 4 || args.len() == 5 => {
+                    let destination = args
+                        .get(4)
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.json", args[3])));
+                    store
+                        .export(&args[3], &destination)
+                        .map(|_| println!("✅ Exported {}", destination.display()))
+                }
+                "delete" if args.len() == 4 => store
+                    .delete(&args[3])
+                    .map(|_| println!("✅ Deleted case {}", args[3])),
+                _ => {
+                    eprintln!("❌ Usage: syspilot cases <list|show|export|delete> [id] [path]");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(error) = outcome {
+                eprintln!("❌ Case operation failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        "fleet" => match args.get(2).map(String::as_str).unwrap_or("") {
+            "enroll" if args.len() == 5 || args.len() == 6 => {
+                let credential = std::env::var("SYSPILOT_FLEET_TOKEN")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| args.get(5).cloned())
+                    .unwrap_or_default();
+                if credential.is_empty() {
+                    eprintln!("❌ Set SYSPILOT_FLEET_TOKEN or provide the token argument.");
+                    std::process::exit(1);
+                }
+                if let Err(error) =
+                    fleet::enroll(&mut conf, args[3].clone(), args[4].clone(), credential)
+                        .and_then(|_| config::save(&conf))
+                {
+                    eprintln!("❌ Fleet enrollment failed: {error}");
+                    std::process::exit(1);
+                }
+                println!(
+                    "✅ Fleet enrollment enabled for node {}",
+                    conf.fleet.node_id
+                );
+                println!("Restart the daemon to begin redacted hosted telemetry delivery.");
+            }
+            "status" if args.len() == 3 => fleet::print_status(&conf),
+            "disable" if args.len() == 3 => {
+                fleet::disable(&mut conf);
+                if let Err(error) = config::save(&conf) {
+                    eprintln!("❌ Could not disable fleet enrollment: {error}");
+                    std::process::exit(1);
+                }
+                println!("✅ Fleet enrollment disabled and hosted credential removed.");
+                println!("Local diagnostics remain available.");
+            }
+            _ => {
+                eprintln!("❌ Usage: syspilot fleet <enroll|status|disable>");
+                std::process::exit(1);
+            }
+        },
+        "alerts" => {
+            let action = args.get(2).map(String::as_str).unwrap_or("list");
+            let mut store = match alert::AlertStore::open(alert::default_path()) {
+                Ok(store) => store,
+                Err(error) => {
+                    eprintln!("❌ Could not load alert state: {error}");
+                    std::process::exit(1);
+                }
+            };
+            match action {
+                "list" if args.len() == 2 || args.len() == 3 => {
+                    match serde_json::to_string_pretty(&store.list()) {
+                        Ok(json) => println!("{json}"),
+                        Err(error) => {
+                            eprintln!("❌ Could not encode alert state: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "acknowledge" | "resolve" | "suppress" if args.len() == 4 => {
+                    let status = match action {
+                        "acknowledge" => alert::AlertStatus::Acknowledged,
+                        "resolve" => alert::AlertStatus::Resolved,
+                        _ => alert::AlertStatus::Suppressed,
+                    };
+                    let detail = format!("operator action: {action}");
+                    match store.set_status(&args[3], status, detail, alert::current_time_ns()) {
+                        Ok(record) => {
+                            println!("✅ Alert {} is now {:?}", record.instance_id, record.status)
+                        }
+                        Err(error) => {
+                            eprintln!("❌ Alert transition failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("❌ Usage: syspilot alerts <list|acknowledge|resolve|suppress> [instance-id]");
+                    std::process::exit(1);
+                }
+            }
         }
         "daemon" => {
             std::process::exit(daemon::run_daemon(conf));
@@ -311,13 +569,41 @@ fn main() {
                             if !view.bearer_token.is_empty() {
                                 view.bearer_token = "[configured]".to_string();
                             }
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&view).unwrap_or_default()
-                            );
+                            println!("{}", json_or_exit(&view, "telemetry configuration"));
+                        }
+                        "preview" => {
+                            let envelope = if let Some(target) = args.get(4) {
+                                let pid = telemetry::find_pid_by_name(target);
+                                if pid == 0 {
+                                    eprintln!("❌ Could not find process PID for: {target}");
+                                    std::process::exit(1);
+                                }
+                                distributed::preview_envelope(
+                                    &conf.distributed_telemetry,
+                                    distributed::TelemetryKind::ProcessSnapshot,
+                                    &telemetry::collect_process_telemetry(pid),
+                                )
+                            } else {
+                                distributed::preview_envelope(
+                                    &conf.distributed_telemetry,
+                                    distributed::TelemetryKind::SystemSnapshot,
+                                    &telemetry::collect_system_telemetry(),
+                                )
+                            };
+                            match envelope {
+                                Ok(envelope) => {
+                                    println!("{}", json_or_exit(&envelope, "telemetry preview"))
+                                }
+                                Err(error) => {
+                                    eprintln!("❌ Could not preview telemetry: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
                         }
                         _ => {
-                            eprintln!("❌ Usage: syspilot config telemetry <enable|disable|show>");
+                            eprintln!(
+                                "❌ Usage: syspilot config telemetry <enable|disable|show|preview>"
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -378,10 +664,10 @@ fn main() {
                         }
                         "list" => println!(
                             "{}",
-                            serde_json::to_string_pretty(
-                                &conf.distributed_telemetry.process_alert_rules
+                            json_or_exit(
+                                &conf.distributed_telemetry.process_alert_rules,
+                                "alert rules"
                             )
-                            .unwrap_or_default()
                         ),
                         _ => {
                             eprintln!("❌ Usage: syspilot config alert <add|remove|list>");
@@ -534,7 +820,7 @@ fn main() {
 
             let prompt = format!(
                 "Terminal Context:\n{}\n\nQuestion: {}",
-                serde_json::to_string_pretty(&ctx).unwrap_or_default(),
+                json_or_exit(&ctx, "AI request context"),
                 question
             );
 
@@ -613,7 +899,7 @@ fn main() {
                     let path = graph.trace_root_cause(&node_id);
                     let chain = graph.serialize_chain_to_json(&path);
 
-                    ctx["causal_chain"] = serde_json::from_str(&chain).unwrap_or_default();
+                    ctx["causal_chain"] = json_value_or_exit(&chain, "causal chain");
                     ctx["analysis_type"] = serde_json::json!("causal_inference_diagnostics");
                     ctx["target_process"] = serde_json::json!(target);
                     ctx["target_pid"] = serde_json::json!(pid);
@@ -744,13 +1030,13 @@ fn main() {
                     3. Which process is the root cause and why\n\
                     4. Recommended actionable mitigation\n\
                     Be extremely specific. Separate observed evidence from inference, identify missing evidence and alternative hypotheses, and provide a Confidence Score (0-100%). Do not claim a root cause when the evidence only supports correlation.",
-                    serde_json::to_string_pretty(&ctx).unwrap_or_default()
+                    json_or_exit(&ctx, "causal analysis context")
                 )
             } else {
                 format!(
                     "Perform causal reasoning on the following OS telemetry and execution context to diagnose the system state.\n\n\
                     OS Telemetry and Context:\n{}\n\nStructure the response as: observed evidence, causal hypothesis, competing explanations, confidence, and safe remediation steps. Do not present inference as fact.",
-                    serde_json::to_string_pretty(&ctx).unwrap_or_default()
+                    json_or_exit(&ctx, "diagnostic context")
                 )
             };
 

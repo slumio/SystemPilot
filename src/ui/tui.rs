@@ -515,7 +515,17 @@ pub fn run_monitor() {
                                 target_pid, target_name
                             );
 
-                        let conf = config::load();
+                        let conf = match config::load_checked() {
+                            Ok(config) => config,
+                            Err(error) => {
+                                eprintln!("Configuration error: {error}. Run `syspilot doctor` and correct the reported file; AI explanation was not started.");
+                                println!("Press Enter to return to monitor...");
+                                let _ = io::stdin().read(&mut buf);
+                                enable_raw_mode();
+                                needs_render = true;
+                                continue;
+                            }
+                        };
                         let mut graph = CausalGraph::new();
                         graph.build_graph(2, false, target_pid);
                         let node_id = format!("pid:{}", target_pid);

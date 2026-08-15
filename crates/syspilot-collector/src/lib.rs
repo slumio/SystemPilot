@@ -5,6 +5,8 @@
 //! intended topology of a ring-buffer reader feeding one correlator thread.
 //! Multiple producers require one instance per producer; they must not share a
 //! ring because that would invalidate the SPSC memory-ordering invariant.
+/// Canonical fleet-control schema migration, embedded for contract tests and tooling.
+pub const FLEET_SCHEMA_V1: &str = include_str!("../../../deploy/fleet/postgres/001_initial.sql");
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -280,5 +282,49 @@ mod tests {
         assert!(ingress.push(critical, EventPriority::Critical));
         assert_eq!(ingress.metrics().auxiliary_dropped, 1);
         assert!(matches!(ingress.try_pop(), Some(RawEvent::OomVictim(_))));
+    }
+}
+
+#[cfg(test)]
+mod fleet_schema_tests {
+    use super::FLEET_SCHEMA_V1;
+
+    #[test]
+    fn every_tenant_table_has_forced_row_level_security() {
+        for table in [
+            "principals",
+            "nodes",
+            "enrollment_credentials",
+            "telemetry_messages",
+            "node_sequence_state",
+            "cases",
+            "case_annotations",
+            "alerts",
+            "retention_policies",
+            "deletion_requests",
+            "audit_events",
+        ] {
+            assert!(
+                FLEET_SCHEMA_V1.contains(&format!("'{}'", table)),
+                "RLS list misses {table}"
+            );
+        }
+        assert!(FLEET_SCHEMA_V1.contains("FORCE ROW LEVEL SECURITY"));
+        assert!(FLEET_SCHEMA_V1.contains("tenant_id = syspilot_control.current_tenant_id()"));
+    }
+
+    #[test]
+    fn ingestion_identity_and_sequence_are_tenant_scoped() {
+        assert!(FLEET_SCHEMA_V1.contains("PRIMARY KEY (tenant_id, node_id, message_id)"));
+        assert!(FLEET_SCHEMA_V1.contains("UNIQUE (tenant_id, node_id, sequence)"));
+        assert!(FLEET_SCHEMA_V1.contains("gap_ranges int8multirange"));
+    }
+
+    #[test]
+    fn secrets_and_audit_history_have_database_guards() {
+        assert!(FLEET_SCHEMA_V1.contains("token_hash bytea NOT NULL"));
+        assert!(!FLEET_SCHEMA_V1.contains("bearer_token"));
+        assert!(FLEET_SCHEMA_V1.contains("audit_events_immutable"));
+        assert!(FLEET_SCHEMA_V1.contains("REVOKE UPDATE, DELETE ON syspilot_control.audit_events"));
     }
 }

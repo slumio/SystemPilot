@@ -1,6 +1,6 @@
 [Unit]
 Description=SysPilot process telemetry daemon
-Documentation=https://github.com/slumio/g
+Documentation=https://github.com/slumio/SystemPilot
 After=network-online.target
 Wants=network-online.target
 
@@ -19,6 +19,8 @@ StateDirectory=syspilot
 StateDirectoryMode=0750
 UMask=0007
 NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true

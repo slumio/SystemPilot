@@ -5,7 +5,9 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -26,10 +28,65 @@ jobs:
       - name: Archive binary and checksum
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/syspilot dist/syspilot-${{ matrix.target }}
-          sha256sum dist/syspilot-${{ matrix.target }} > dist/syspilot-${{ matrix.target }}.sha256
+          install -m 0755 target/${{ matrix.target }}/release/syspilot dist/syspilot
+          tar -C dist -czf dist/syspilot-${{ matrix.target }}.tar.gz syspilot
+          rm dist/syspilot
+          cd dist
+          sha256sum syspilot-${{ matrix.target }}.tar.gz > syspilot-${{ matrix.target }}.tar.gz.sha256
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: target/${{ matrix.target }}/release/syspilot
+          artifact-name: syspilot-${{ matrix.target }}.spdx.json
+          output-file: dist/syspilot-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+      - name: Attest release archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/syspilot-${{ matrix.target }}.tar.gz
+      - uses: sigstore/cosign-installer@v3.9.2
+      - name: Sign release archive
+        run: cosign sign-blob --yes --bundle dist/syspilot-${{ matrix.target }}.tar.gz.sigstore.json dist/syspilot-${{ matrix.target }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: syspilot-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: syspilot-*
+          path: dist
+          merge-multiple: true
+      - name: Verify archives and create release manifest
+        run: |
+          cd dist
+          sha256sum --check syspilot-*.tar.gz.sha256
+          sha256sum syspilot-*.tar.gz syspilot-*.spdx.json > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syspilot-release-assets
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: syspilot-release-assets
+          path: dist
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" dist/*
+          else
+            gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+          fi

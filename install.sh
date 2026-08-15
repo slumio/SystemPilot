@@ -2,42 +2,47 @@
 set -eu
 
 REPOSITORY="slumio/SystemPilot"
-REF="${SYSPILOT_REF:-dev}"
+VERSION="${SYSPILOT_VERSION:-latest}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'SysPilot installer: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = "Linux" ] || fail "Linux is required."
-for command_name in curl tar cargo; do
-    command -v "$command_name" >/dev/null 2>&1 || fail "'$command_name' is required. Install Rust from https://rustup.rs, then retry."
+for command_name in curl tar sha256sum awk find install; do
+    command -v "$command_name" >/dev/null 2>&1 || fail "'$command_name' is required."
 done
 
 install_dir=$(mktemp -d "${TMPDIR:-/tmp}/syspilot-install.XXXXXX") || fail "could not create a temporary directory."
 trap 'rm -rf "$install_dir"' EXIT HUP INT TERM
 
-archive_url="https://github.com/${REPOSITORY}/archive/${REF}.tar.gz"
-archive_path="${install_dir}/source.tar.gz"
-say "Downloading SysPilot (${REF})..."
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-    --output "$archive_path" "$archive_url" ||
-    fail "could not download ref '${REF}'. Use an existing branch or release tag."
-tar -xzf "$archive_path" --strip-components=1 -C "$install_dir" ||
-    fail "the downloaded source archive is invalid."
-rm -f "$archive_path"
+architecture=$(uname -m)
+case "$architecture" in
+    x86_64) release_target="x86_64-unknown-linux-gnu" ;;
+    aarch64|arm64) release_target="aarch64-unknown-linux-gnu" ;;
+    *) release_target="" ;;
+esac
 
-say "Building and installing SysPilot..."
-cargo install --locked --path "$install_dir"
+install_release() {
+    [ -n "$release_target" ] || fail "unsupported architecture: $architecture (supported: x86_64, aarch64)"
+    asset="syspilot-${release_target}.tar.gz"
+    if [ "$VERSION" = "latest" ]; then
+        release_base="https://github.com/${REPOSITORY}/releases/latest/download"
+    else
+        release_base="https://github.com/${REPOSITORY}/releases/download/${VERSION}"
+    fi
+    say "Trying checksum-verified SysPilot release (${VERSION}, ${release_target})..."
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "${install_dir}/${asset}" "${release_base}/${asset}" || fail "could not download release archive: ${release_base}/${asset}"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "${install_dir}/${asset}.sha256" "${release_base}/${asset}.sha256" || fail "could not download release checksum: ${release_base}/${asset}.sha256"
+    expected=$(awk 'NR == 1 { print $1 }' "${install_dir}/${asset}.sha256")
+    actual=$(sha256sum "${install_dir}/${asset}" | awk '{ print $1 }')
+    [ -n "$expected" ] && [ "$actual" = "$expected" ] || fail "release checksum verification failed"
+    mkdir -p "${install_dir}/release" "$HOME/.local/bin" || fail "could not create installation directories"
+    tar -xzf "${install_dir}/${asset}" -C "${install_dir}/release" || fail "checksum-verified release archive is invalid"
+    release_binary=$(find "${install_dir}/release" -type f -name syspilot -print -quit)
+    [ -n "$release_binary" ] && [ -f "$release_binary" ] || fail "checksum-verified release archive does not contain syspilot"
+    install -m 0755 "$release_binary" "${HOME}/.local/bin/.syspilot-install" || fail "could not stage the release binary"
+    mv "${HOME}/.local/bin/.syspilot-install" "${HOME}/.local/bin/syspilot" || fail "could not atomically replace the installed binary"
+}
 
-cargo_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
-installed_binary="${cargo_root}/bin/syspilot"
-[ -x "$installed_binary" ] || fail "Cargo completed but ${installed_binary} was not created."
-
-# Keep the user-local path used by `syspilot setup` in sync. Atomic replacement
-# allows this to update an older binary even when a daemon is still executing it.
-"$installed_binary" install --binary --force ||
-    fail "the build succeeded, but the user-local binary could not be updated."
-
-say ""
-say "SysPilot installed successfully."
-say "Binary: $HOME/.local/bin/syspilot"
+install_release
 say "Next: syspilot setup"

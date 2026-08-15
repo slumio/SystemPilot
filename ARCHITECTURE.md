@@ -29,11 +29,14 @@ CLI / TUI ──> main.rs ──> telemetry.rs ─┼──> causal_engine.rs �
 | `src/profiler.rs` | Optional process profiling data. |
 | `src/ui/` | Terminal monitor and Markdown stream renderer. |
 | `crates/syspilot-abi` | Shared telemetry ABI types. |
-| `crates/syspilot-collector` | Bounded collector primitives. |
+| `crates/syspilot-collector` | Bounded collector primitives and fleet database schema invariants. |
+| `deploy/fleet/` | PostgreSQL fleet-control migration and fail-closed setup tooling. |
 
 ## Distributed telemetry boundary
 
-The daemon publishes `process_lifecycle` and configured `process_alert` envelopes. The exporter is asynchronous and bounded so collector latency does not block the Netlink loop. Delivery is HTTP POST to the configured endpoint; unsent messages are not persisted to disk. Collector outages, process termination, and queue pressure can therefore cause loss. Collectors should use `node_id` and monotonic `sequence` to deduplicate deliveries and detect gaps.
+The daemon persists redacted `process_lifecycle` and configured `process_alert` envelopes before asynchronous HTTP delivery, so collector latency never blocks the Netlink loop. Acknowledged records leave the spool; failures remain durable for replay. Collectors use `node_id`, `message_id`, and monotonic `sequence` to deduplicate deliveries and report gaps.
+
+The optional fleet database exists only behind the collector/control-plane API. Agents never receive database credentials or issue SQL. PostgreSQL row-level security provides defense in depth, but request authorization must still derive and set the verified tenant inside every transaction. See [Fleet control-plane database](docs/FLEET_CONTROL_PLANE.md).
 
 The collector endpoint, authentication token, node ID, attributes, batch size, queue capacity, retry policy, and alert rules are configuration, not source-code deployment values. See [Distributed telemetry and alerts](README.md#distributed-telemetry-and-alerts).
 

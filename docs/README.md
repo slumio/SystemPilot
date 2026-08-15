@@ -8,9 +8,15 @@ This directory contains the current operational documentation for the Rust appli
 |---|---|---|
 | [Project README](../README.md) | Install, setup, AI, RCA, telemetry, alerts, configuration, troubleshooting. | Canonical user and operator guide. |
 | [Architecture](../ARCHITECTURE.md) | Current Rust module boundaries, data flow, and delivery guarantees. | Canonical technical overview. |
+| [Feature reference](FEATURES.md) | Every command family, offline/network behavior, persistence, permissions, and exit semantics. | Canonical product behavior reference. |
+| [Engineering architecture](ENGINEERING.md) | SOLID boundaries, dependency direction, module ownership, and change rules. | Canonical maintainability guide. |
+| [Testing](TESTING.md) | Local/CI gates and functional smoke matrix. | Canonical verification guide. |
 | [Developer guide](../developer_guide.md) | Local development, tests, and module map. | Canonical developer guide. |
 | [Contributing guide](../CONTRIBUTING.md) | Contribution policy and expectations. | Canonical contributor guide. |
 | [Daemon reliability](RELIABILITY.md) | systemd service installation and health checks. | Canonical operations guide. |
+| [Telemetry protocol](TELEMETRY_PROTOCOL.md) | Public schema-v1 collector and compatibility contract. | Canonical protocol specification. |
+| [Fleet database](FLEET_CONTROL_PLANE.md) | PostgreSQL schema, tenant isolation, setup, ingestion transactions, and operations. | Canonical fleet-control storage guide. |
+| [Configuration migrations](CONFIG_MIGRATIONS.md) | Versioned upgrades, immutable backups, fail-closed validation, and rollback. | Canonical configuration recovery guide. |
 
 ## Documentation order
 
