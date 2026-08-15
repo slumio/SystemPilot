@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use syspilot::distributed::{
     IngestionAcknowledgement, ProcessAlert, RejectedRecord, TelemetryEnvelope, TelemetryKind,
@@ -46,6 +46,42 @@ const RETRY_AFTER_SECONDS: &str = "1";
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const MIN_REASONABLE_UNIX_SECONDS: u64 = 946_684_800; // 2000-01-01T00:00:00Z
 const MAX_REASONABLE_UNIX_SECONDS: u64 = 4_102_444_799; // 2099-12-31T23:59:59Z
+
+/// Small in-process circuit that prevents a failing provider from causing a
+/// tight lease/fail loop. Durable queue state remains authoritative on restart.
+#[derive(Default)]
+pub struct DeliveryCircuit {
+    failures: u8,
+    opened_at: Option<Instant>,
+}
+
+impl DeliveryCircuit {
+    const FAILURE_LIMIT: u8 = 5;
+    const COOLDOWN: Duration = Duration::from_secs(30);
+
+    pub fn is_open(&mut self) -> bool {
+        if self
+            .opened_at
+            .is_some_and(|opened| opened.elapsed() >= Self::COOLDOWN)
+        {
+            self.failures = 0;
+            self.opened_at = None;
+        }
+        self.opened_at.is_some()
+    }
+
+    pub fn record(&mut self, success: bool) {
+        if success {
+            self.failures = 0;
+            self.opened_at = None;
+        } else {
+            self.failures = self.failures.saturating_add(1);
+            if self.failures >= Self::FAILURE_LIMIT {
+                self.opened_at = Some(Instant::now());
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnixTimestamp {
@@ -789,6 +825,19 @@ mod tests {
         assert!(admission.try_acquire(tenant_b, "shared-node").is_some());
         drop(held);
         assert!(admission.try_acquire(tenant_a, "shared-node").is_some());
+    }
+
+    #[test]
+    fn delivery_circuit_opens_after_bounded_failures_and_resets_on_success() {
+        let mut circuit = DeliveryCircuit::default();
+        for _ in 0..DeliveryCircuit::FAILURE_LIMIT - 1 {
+            circuit.record(false);
+            assert!(!circuit.is_open());
+        }
+        circuit.record(false);
+        assert!(circuit.is_open());
+        circuit.record(true);
+        assert!(!circuit.is_open());
     }
 
     #[test]

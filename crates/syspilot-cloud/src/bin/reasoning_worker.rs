@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-use reqwest::{Client, Url};
+use reqwest::{redirect::Policy, Client, StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, PgPoolOptions};
 use std::{env, time::Duration};
 use syspilot_cloud::db as sqlx;
+use syspilot_cloud::DeliveryCircuit;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -94,11 +95,18 @@ async fn run() -> Result<(), String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(8)
+        .redirect(Policy::none())
         .build()
         .map_err(|error| format!("could not create reasoning client: {error}"))?;
+    let mut circuit = DeliveryCircuit::default();
     loop {
+        if circuit.is_open() {
+            tracing::warn!("reasoning provider circuit is open; durable jobs remain queued");
+            tokio::time::sleep(config.poll_interval).await;
+            continue;
+        }
         match lease(&pool).await {
-            Ok(Some(job)) => process(&pool, &client, &config, job).await,
+            Ok(Some(job)) => circuit.record(process(&pool, &client, &config, job).await),
             Ok(None) => tokio::time::sleep(config.poll_interval).await,
             Err(error) => {
                 tracing::error!(error = %error, "reasoning lease failed");
@@ -126,7 +134,7 @@ async fn lease(pool: &PgPool) -> Result<Option<Job>, sqlx::Error> {
     })
 }
 
-async fn process(pool: &PgPool, client: &Client, config: &WorkerConfig, job: Job) {
+async fn process(pool: &PgPool, client: &Client, config: &WorkerConfig, job: Job) -> bool {
     let request = ReasoningRequest {
         schema_version: 1,
         node_id: &job.node_id,
@@ -140,25 +148,44 @@ async fn process(pool: &PgPool, client: &Client, config: &WorkerConfig, job: Job
         .send()
         .await;
     let result = match outcome {
-        Ok(response) if response.status().is_success() => response
-            .json::<Value>()
-            .await
-            .ok()
-            .filter(Value::is_object)
-            .ok_or("invalid_response"),
-        Ok(response) if response.status().as_u16() == 429 => Err("rate_limited"),
-        Ok(response) if response.status().is_server_error() => Err("provider_unavailable"),
-        Ok(_) => Err("provider_rejected"),
+        Ok(response) => {
+            let status = response.status();
+            let body = if status.is_success() {
+                response.json::<Value>().await.ok()
+            } else {
+                None
+            };
+            classify_response(status, body)
+        }
         Err(error) if error.is_timeout() => Err("provider_timeout"),
         Err(_) => Err("transport_failure"),
     };
+    let success = result.is_ok();
     let update = match result {
         Ok(result) => complete(pool, &job, result).await,
         Err(code) => fail(pool, &job, code).await,
     };
     if let Err(error) = update {
         tracing::error!(job_id = job.job_id, error = %error, "reasoning job state update failed");
+        return false;
     }
+    success
+}
+
+fn classify_response(status: StatusCode, body: Option<Value>) -> Result<Value, &'static str> {
+    if status.is_redirection() {
+        return Err("redirect_rejected");
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Err("rate_limited");
+    }
+    if status.is_server_error() {
+        return Err("provider_unavailable");
+    }
+    if !status.is_success() {
+        return Err("provider_rejected");
+    }
+    body.filter(Value::is_object).ok_or("invalid_response")
 }
 
 async fn complete(pool: &PgPool, job: &Job, result: Value) -> Result<(), sqlx::Error> {
@@ -197,5 +224,28 @@ mod tests {
         let encoded = serde_json::to_string(&request).unwrap();
         assert!(!encoded.contains("tenant"));
         assert!(!encoded.contains("token"));
+    }
+
+    #[test]
+    fn provider_responses_have_bounded_failure_codes() {
+        assert_eq!(
+            classify_response(StatusCode::TOO_MANY_REQUESTS, None),
+            Err("rate_limited")
+        );
+        assert_eq!(
+            classify_response(StatusCode::BAD_GATEWAY, None),
+            Err("provider_unavailable")
+        );
+        assert_eq!(
+            classify_response(StatusCode::FOUND, None),
+            Err("redirect_rejected")
+        );
+        assert_eq!(
+            classify_response(StatusCode::OK, Some(Value::Null)),
+            Err("invalid_response")
+        );
+        assert!(
+            classify_response(StatusCode::OK, Some(serde_json::json!({"summary":"ok"}))).is_ok()
+        );
     }
 }

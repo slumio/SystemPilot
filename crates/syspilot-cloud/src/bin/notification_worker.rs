@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-use reqwest::{Client, Url};
+use reqwest::{redirect::Policy, Client, StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, PgPoolOptions};
 use std::{env, time::Duration};
 use syspilot_cloud::db as sqlx;
+use syspilot_cloud::DeliveryCircuit;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -96,11 +97,20 @@ async fn run() -> Result<(), String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(8)
+        .redirect(Policy::none())
         .build()
         .map_err(|error| format!("could not create notification client: {error}"))?;
+    let mut circuit = DeliveryCircuit::default();
     loop {
+        if circuit.is_open() {
+            tracing::warn!(
+                "notification provider circuit is open; durable deliveries remain queued"
+            );
+            tokio::time::sleep(config.poll_interval).await;
+            continue;
+        }
         match lease(&pool).await {
-            Ok(Some(delivery)) => process(&pool, &client, &config, delivery).await,
+            Ok(Some(delivery)) => circuit.record(process(&pool, &client, &config, delivery).await),
             Ok(None) => tokio::time::sleep(config.poll_interval).await,
             Err(error) => {
                 tracing::error!(error = %error, "notification lease failed");
@@ -133,7 +143,12 @@ async fn lease(pool: &PgPool) -> Result<Option<Delivery>, sqlx::Error> {
     })
 }
 
-async fn process(pool: &PgPool, client: &Client, config: &WorkerConfig, delivery: Delivery) {
+async fn process(
+    pool: &PgPool,
+    client: &Client,
+    config: &WorkerConfig,
+    delivery: Delivery,
+) -> bool {
     let request = NotificationRequest {
         schema_version: 1,
         alert_instance_id: &delivery.alert_instance_id,
@@ -147,20 +162,35 @@ async fn process(pool: &PgPool, client: &Client, config: &WorkerConfig, delivery
         .json(&request)
         .send()
         .await;
+    let success = outcome
+        .as_ref()
+        .is_ok_and(|response| response.status().is_success());
     let result = match outcome {
-        Ok(response) if response.status().is_success() => complete(pool, &delivery).await,
-        Ok(response) if response.status().as_u16() == 429 => {
-            fail(pool, &delivery, "rate_limited").await
-        }
-        Ok(response) if response.status().is_server_error() => {
-            fail(pool, &delivery, "provider_unavailable").await
-        }
-        Ok(_) => fail(pool, &delivery, "provider_rejected").await,
+        Ok(response) => match classify_status(response.status()) {
+            Ok(()) => complete(pool, &delivery).await,
+            Err(code) => fail(pool, &delivery, code).await,
+        },
         Err(error) if error.is_timeout() => fail(pool, &delivery, "provider_timeout").await,
         Err(_) => fail(pool, &delivery, "transport_failure").await,
     };
     if let Err(error) = result {
         tracing::error!(delivery_id = delivery.delivery_id, error = %error, "notification state update failed");
+        return false;
+    }
+    success
+}
+
+fn classify_status(status: StatusCode) -> Result<(), &'static str> {
+    if status.is_redirection() {
+        Err("redirect_rejected")
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        Err("rate_limited")
+    } else if status.is_server_error() {
+        Err("provider_unavailable")
+    } else if status.is_success() {
+        Ok(())
+    } else {
+        Err("provider_rejected")
     }
 }
 
@@ -200,5 +230,23 @@ mod tests {
         let encoded = serde_json::to_string(&request).unwrap();
         assert!(!encoded.contains("tenant"));
         assert!(!encoded.contains("token"));
+    }
+
+    #[test]
+    fn delivery_statuses_reject_redirects_and_classify_retries() {
+        assert_eq!(classify_status(StatusCode::FOUND), Err("redirect_rejected"));
+        assert_eq!(
+            classify_status(StatusCode::TOO_MANY_REQUESTS),
+            Err("rate_limited")
+        );
+        assert_eq!(
+            classify_status(StatusCode::SERVICE_UNAVAILABLE),
+            Err("provider_unavailable")
+        );
+        assert_eq!(
+            classify_status(StatusCode::BAD_REQUEST),
+            Err("provider_rejected")
+        );
+        assert_eq!(classify_status(StatusCode::NO_CONTENT), Ok(()));
     }
 }

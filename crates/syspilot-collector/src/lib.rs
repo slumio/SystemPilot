@@ -15,6 +15,9 @@ pub const FLEET_SCHEMA_V3: &str =
 /// Content-bound replay integrity migration.
 pub const FLEET_SCHEMA_V4: &str =
     include_str!("../../../deploy/fleet/postgres/004_replay_integrity.sql");
+/// Worker lease recovery and delivery observability migration.
+pub const FLEET_SCHEMA_V5: &str =
+    include_str!("../../../deploy/fleet/postgres/005_worker_delivery_hardening.sql");
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -267,7 +270,9 @@ mod tests {
 
 #[cfg(test)]
 mod fleet_schema_tests {
-    use super::{FLEET_SCHEMA_V1, FLEET_SCHEMA_V2, FLEET_SCHEMA_V3, FLEET_SCHEMA_V4};
+    use super::{
+        FLEET_SCHEMA_V1, FLEET_SCHEMA_V2, FLEET_SCHEMA_V3, FLEET_SCHEMA_V4, FLEET_SCHEMA_V5,
+    };
 
     #[test]
     fn every_tenant_table_has_forced_row_level_security() {
@@ -325,6 +330,9 @@ mod fleet_schema_tests {
         assert!(FLEET_SCHEMA_V3.contains("lease_notification_delivery"));
         assert!(FLEET_SCHEMA_V4.contains("envelope_digest bytea"));
         assert!(FLEET_SCHEMA_V4.contains("octet_length(envelope_digest) = 32"));
+        assert!(FLEET_SCHEMA_V5.contains("delivery.leased_until < clock_timestamp()"));
+        assert!(FLEET_SCHEMA_V5.contains("worker_delivery_health"));
+        assert!(FLEET_SCHEMA_V5.contains("oldest_queue_age_seconds"));
         assert!(FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text)"));
         assert!(!FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text, token"));
     }
