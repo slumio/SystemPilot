@@ -86,7 +86,7 @@ syspilot completions zsh
 syspilot completions fish
 ```
 
-`setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
+`setup` starts a terminal configuration wizard for local-only, self-hosted collector, or hosted-fleet operation, followed by optional AI configuration and a masked confirmation screen. It validates the complete draft before writing, does not change your shell profile, and never echoes fleet credentials. Use `syspilot setup --line` over restricted terminals or `syspilot setup --check` to inspect terminal capability without changing configuration. `syspilot setup --tui` fails explicitly when a full-screen terminal is unavailable instead of silently falling back.
 
 ### Build from source instead
 

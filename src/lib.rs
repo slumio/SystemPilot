@@ -27,6 +27,7 @@ pub mod install;
 pub mod output;
 pub mod profiler;
 pub mod safety;
+pub mod setup;
 pub mod spool;
 pub mod support;
 pub mod telemetry;

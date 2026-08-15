@@ -34,6 +34,7 @@ Dependencies point inward. Domain records do not print, exit the process, initia
 | `distributed`, `spool` | Envelope/redaction, acknowledgement, replay | PostgreSQL |
 | `fleet` | Enrollment consistency and operator status | Direct database access |
 | `support` | Mandatory sanitization and atomic artifact creation | Upload |
+| `setup` | Typed setup draft, terminal capability, validation, review, and apply flow | Secret display or unconfirmed mutation |
 | `daemon` | Runtime orchestration/transports | CLI configuration editing |
 | `daemon_client` | Typed local-socket requests, timeouts, and response validation | Rendering or silent procfs fallback |
 | `daemon_health` | Typed health-file decoding and freshness calculation | Rendering or zero-valued error defaults |

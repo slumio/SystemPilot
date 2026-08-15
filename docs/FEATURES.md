@@ -6,7 +6,7 @@ This document describes implemented behavior. SysPilot is a Linux operator tool:
 
 | Command | Purpose | Network | Persistent writes | Failure behavior |
 |---|---|---:|---|---|
-| `setup` | Guided local-only, collector, or hosted setup | Only for selected remote mode | Configuration and installation state | Invalid choices or writes fail visibly. |
+| `setup [--tui\|--line\|--check]` | Validated terminal wizard for local-only, collector, or hosted setup | Only for selected remote mode | Configuration and installation state after confirmation | Terminal fallback is explicit; cancellation is non-mutating; invalid choices or writes fail visibly. |
 | `install [--binary [--force]]` | Install shell integration or user binary | No | User configuration/hooks/binary | Existing binary is preserved unless `--force`. |
 | `uninstall [--binary]` | Remove hooks or user binary | No | Removes selected integration | Does not purge cases or configuration. |
 | `status` | Summarize installation, provider, export, and daemon health | No | No | Missing/stale components are printed. |

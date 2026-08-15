@@ -8,6 +8,7 @@ fn bash() -> String {
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
     case "$prev" in
+        setup) COMPREPLY=( $(compgen -W "--tui --line --check" -- "$cur") ); return ;;
         provider) COMPREPLY=( $(compgen -W "gemini ollama syspilot" -- "$cur") ); return ;;
         completions) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ); return ;;
         cases) COMPREPLY=( $(compgen -W "list show export delete" -- "$cur") ); return ;;
@@ -35,6 +36,7 @@ _syspilot() {{
   commands=({})
   if (( CURRENT == 2 )); then _describe 'command' commands; return; fi
   case $words[2] in
+    setup) _arguments '--tui' '--line' '--check' ;;
     provider) _values 'provider' gemini ollama syspilot ;;
     completions) _values 'shell' bash zsh fish ;;
     cases) _values 'action' list show export delete ;;
@@ -64,6 +66,9 @@ fn fish() -> String {
         ));
     }
     output.push_str("complete -c syspilot -n '__fish_seen_subcommand_from provider' -a 'gemini ollama syspilot'\n");
+    output.push_str(
+        "complete -c syspilot -n '__fish_seen_subcommand_from setup' -a '--tui --line --check'\n",
+    );
     output.push_str(
         "complete -c syspilot -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'\n",
     );

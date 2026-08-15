@@ -4,7 +4,7 @@ use crate::error::AppResult;
 use crate::output::{CapabilityState, DiagnosticV1, Outcome, OutputEnvelopeV1};
 use serde::Serialize;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -154,43 +154,6 @@ pub fn install() -> bool {
     println!("  source {}", hook_path.display());
     println!("The profile is not edited automatically.");
     println!("Optional: run `syspilot install --binary` to copy this binary to ~/.local/bin.");
-    true
-}
-
-pub fn setup() -> bool {
-    println!(
-        "Welcome to SysPilot setup. You can change every setting later with `syspilot config`."
-    );
-    if !install() {
-        return false;
-    }
-    let _ = install_user_binary(false);
-    println!("\nChoose AI setup: [1] Gemini  [2] Ollama  [3] Skip for now");
-    print!("Choice [3]: ");
-    let _ = io::stdout().flush();
-    let mut choice = String::new();
-    let _ = io::stdin().read_line(&mut choice);
-    let mut cfg = match config::load_checked() {
-        Ok(cfg) => cfg,
-        Err(error) => {
-            eprintln!("❌ Could not load configuration: {error}");
-            return false;
-        }
-    };
-    match choice.trim() {
-        "1" => { print!("Gemini API key: "); let _ = io::stdout().flush(); let mut key = String::new(); let _ = io::stdin().read_line(&mut key); if key.trim().is_empty() { println!("No key entered. Gemini was not configured."); } else { cfg.active_provider = "gemini".to_string(); cfg.gemini_api_key = key.trim().to_string(); } }
-        "2" => { cfg.active_provider = "ollama".to_string(); print!("Ollama URL [{}]: ", cfg.ollama_url); let _ = io::stdout().flush(); let mut url = String::new(); let _ = io::stdin().read_line(&mut url); if !url.trim().is_empty() { cfg.ollama_url = url.trim().to_string(); } }
-        _ => println!("AI setup skipped. Configure it later with `syspilot provider` and `syspilot config set-key`."),
-    }
-    if let Err(error) = config::save(&cfg) {
-        eprintln!("❌ Could not save configuration: {error}");
-        return false;
-    }
-    println!("\nNext steps:");
-    println!("  1. source ~/.syspilot/syspilot.sh");
-    println!("  2. syspilot status");
-    println!("  3. syspilot explain --pid $$");
-    println!("  4. syspilot --help");
     true
 }
 

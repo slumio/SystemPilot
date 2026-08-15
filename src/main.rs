@@ -3,7 +3,7 @@
 
 use syspilot::{
     ai, alert, causal_engine, codebase, completions, config, daemon, daemon_client, distributed,
-    doctor, evidence, fleet, install, output, profiler, support, telemetry, ui, utils,
+    doctor, evidence, fleet, install, output, profiler, setup, support, telemetry, ui, utils,
 };
 
 use causal_engine::CausalGraph;
@@ -75,7 +75,7 @@ fn print_help() {
         "🤖 SysPilot: Operating System Reasoning Agent (Rust Edition)\n\n\
         Usage: syspilot <command> [options]\n\n\
         Commands:\n\
-          setup                         Guided first-run setup
+          setup [--tui|--line|--check]  Guided terminal configuration
           install                       Create local configuration and shell hook
           install --binary [--force]    Copy this binary to ~/.local/bin
           uninstall --binary            Remove only the user-local binary\n\
@@ -306,14 +306,27 @@ fn main() {
         create_support_bundle_or_exit(&args, json_requested);
         return;
     }
+    if args[1] == "setup" {
+        let mode = match args.get(2).map(String::as_str) {
+            None => setup::InterfaceMode::Auto,
+            Some("--tui") if args.len() == 3 => setup::InterfaceMode::Tui,
+            Some("--line") if args.len() == 3 => setup::InterfaceMode::Line,
+            Some("--check") if args.len() == 3 => setup::InterfaceMode::Check,
+            _ => {
+                eprintln!("❌ Usage: syspilot setup [--tui|--line|--check]");
+                std::process::exit(1);
+            }
+        };
+        if !setup::run(mode) {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let mut conf = load_config_or_exit();
     let cmd = args[1].as_str();
 
     match cmd {
-        "setup" => {
-            install::setup();
-        }
         "install" => {
             let binary = args.iter().any(|arg| arg == "--binary");
             let force = args.iter().any(|arg| arg == "--force");
