@@ -188,8 +188,13 @@ jobs:
         run: docker build --file Dockerfile.cloud --tag syspilot-cloud:ci .
       - name: Lint and render hardened AWS chart
         run: |
-          helm lint deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver
-          helm template syspilot deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver > /tmp/syspilot-cloud-manifests.yaml
+          digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          helm lint deploy/cloud/helm/syspilot --set image.digest=$digest --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver
+          helm template syspilot deploy/cloud/helm/syspilot --set image.digest=$digest --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver > /tmp/syspilot-cloud-manifests.yaml
+          if helm template syspilot deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze --set notification.endpoint=https://notification.example.test/v1/deliver >/dev/null 2>&1; then
+            echo "mutable production image unexpectedly rendered" >&2
+            exit 1
+          fi
 
   fleet-schema:
     runs-on: ubuntu-latest

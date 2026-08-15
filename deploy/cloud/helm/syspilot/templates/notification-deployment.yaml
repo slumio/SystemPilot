@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: notification
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "syspilot.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/syspilot-notification-worker"]
           env:

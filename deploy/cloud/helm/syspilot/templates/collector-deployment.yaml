@@ -27,7 +27,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: collector
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "syspilot.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

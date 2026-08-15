@@ -1,6 +1,9 @@
 image:
   repository: ghcr.io/slumio/syspilot-cloud
-  tag: "0.1.0"
+  # Production installs must set a sha256 digest. Mutable tags are local-only.
+  digest: ""
+  tag: "dev"
+  allowMutableTagForLocalDevelopment: false
   pullPolicy: IfNotPresent
 
 serviceAccount:
