@@ -125,8 +125,11 @@ impl MdStreamer {
             if consumed > 0 {
                 self.pos += consumed;
             } else {
-                let c = self.buffer.as_bytes()[self.pos] as char;
-                self.pos += 1;
+                let c = self.buffer[self.pos..]
+                    .chars()
+                    .next()
+                    .expect("streamer position is within the buffer");
+                self.pos += c.len_utf8();
                 if c == '\n' {
                     self.is_newline = true;
                     out.push_str("\x1b[0m");
@@ -169,8 +172,11 @@ impl MdStreamer {
             if consumed > 0 {
                 self.pos += consumed;
             } else {
-                let c = self.buffer.as_bytes()[self.pos] as char;
-                self.pos += 1;
+                let c = self.buffer[self.pos..]
+                    .chars()
+                    .next()
+                    .expect("streamer position is within the buffer");
+                self.pos += c.len_utf8();
                 if c == '\n' {
                     self.is_newline = true;
                     out.push_str("\x1b[0m");

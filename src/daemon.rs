@@ -1,17 +1,21 @@
-/// SysPilot Daemon — syspilotd
+/// SysPilot Daemon — syspilot daemon
 ///
 /// Subscribes to Linux Netlink Process Connector (cn_proc) for zero-polling
 /// process lifecycle events. Serves process tree and event data over a UNIX
 /// socket in the configured SysPilot runtime directory.
+use crate::alert::AlertStore;
 use crate::distributed::{ProcessAlertEngine, TelemetryKind, TelemetryPublisher};
 use dashmap::DashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ── Data structures ───────────────────────────────────────────────────────────
+
+static NETLINK_STATE: AtomicI32 = AtomicI32::new(0);
+static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 struct ProcessNode {
@@ -67,7 +71,7 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_health(state: &str) {
+fn write_health(state: &str, publisher: &TelemetryPublisher) {
     let health_path = crate::config::daemon_health_path();
     if let Some(parent) = health_path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
@@ -80,6 +84,9 @@ fn write_health(state: &str) {
         "pid": std::process::id(),
         "heartbeat_unix_nanos": now_ns(),
         "socket": crate::config::daemon_socket_label(),
+        "netlink_state": match NETLINK_STATE.load(Ordering::Relaxed) { 1 => "active", 2 => "degraded", _ => "starting" },
+        "dropped_events": DROPPED_EVENTS.load(Ordering::Relaxed),
+        "exporter": publisher.health(),
     });
     let temporary = health_path.with_extension("tmp");
     if let Err(error) = std::fs::write(&temporary, document.to_string())
@@ -143,12 +150,14 @@ fn netlink_listener(
     running: Arc<AtomicBool>,
     publisher: Arc<TelemetryPublisher>,
     alerts: Arc<ProcessAlertEngine>,
+    alert_state: Arc<Mutex<AlertStore>>,
 ) {
     use libc::*;
 
     // socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR)
     let nl_fd = unsafe { socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_CONNECTOR) };
     if nl_fd < 0 {
+        NETLINK_STATE.store(2, Ordering::Relaxed);
         tracing::warn!("[daemon] Netlink socket failed; serving the initial /proc snapshot without live events.");
         return;
     }
@@ -167,6 +176,7 @@ fn netlink_listener(
         )
     } < 0
     {
+        NETLINK_STATE.store(2, Ordering::Relaxed);
         tracing::error!(
             "[daemon] Netlink bind failed; serving the initial /proc snapshot without live events."
         );
@@ -204,6 +214,7 @@ fn netlink_listener(
         )
     };
     if sent != sub_buf.len() as isize {
+        NETLINK_STATE.store(2, Ordering::Relaxed);
         let error = std::io::Error::last_os_error();
         tracing::warn!(
             "[daemon] Netlink Process Connector subscription failed: {}; serving the initial /proc snapshot without live events.",
@@ -232,6 +243,7 @@ fn netlink_listener(
             if err == EINTR {
                 continue;
             }
+            NETLINK_STATE.store(2, Ordering::Relaxed);
             break;
         }
 
@@ -267,6 +279,7 @@ fn netlink_listener(
                         "[daemon] Netlink Process Connector rejected the subscription: {}. Grant cap_net_admin to the binary or run the packaged system service.",
                         error
                     );
+                    NETLINK_STATE.store(2, Ordering::Relaxed);
                     unsafe { close(nl_fd) };
                     return;
                 }
@@ -294,6 +307,7 @@ fn netlink_listener(
             // CN_IDX_PROC=1, CN_VAL_PROC=1
             if cn_idx == 1 && cn_val == 1 {
                 if !connector_confirmed {
+                    NETLINK_STATE.store(1, Ordering::Relaxed);
                     tracing::info!("[daemon] Netlink Process Connector active (zero-polling)");
                     connector_confirmed = true;
                 }
@@ -341,7 +355,7 @@ fn netlink_listener(
                                     parent_exit_signal: None,
                                     exit_reason: None,
                                 };
-                                record_event(&events, &publisher, &alerts, event);
+                                record_event(&events, &publisher, &alerts, &alert_state, event);
                             }
                         2
                             // exec
@@ -370,7 +384,7 @@ fn netlink_listener(
                                     parent_exit_signal: None,
                                     exit_reason: None,
                                 };
-                                record_event(&events, &publisher, &alerts, event);
+                                record_event(&events, &publisher, &alerts, &alert_state, event);
                             }
                         0x8000_0000
                             // exit
@@ -404,7 +418,7 @@ fn netlink_listener(
                                     parent_exit_signal: Some(parent_exit_signal),
                                     exit_reason: Some(describe_exit_status(exit_status)),
                                 };
-                                record_event(&events, &publisher, &alerts, event);
+                                record_event(&events, &publisher, &alerts, &alert_state, event);
                             }
                         _ => {}
                     }
@@ -425,9 +439,12 @@ fn record_event(
     events: &crossbeam_channel::Sender<ProcessEvent>,
     publisher: &TelemetryPublisher,
     alerts: &ProcessAlertEngine,
+    alert_state: &Mutex<AlertStore>,
     event: ProcessEvent,
 ) {
-    publisher.publish(TelemetryKind::ProcessLifecycle, &event);
+    if let Err(error) = publisher.publish(TelemetryKind::ProcessLifecycle, &event) {
+        tracing::error!("[telemetry] lifecycle event was not persisted: {error}");
+    }
     for alert in alerts.evaluate(
         &event.name,
         event.pid,
@@ -435,9 +452,29 @@ fn record_event(
         &event.event_type,
         event.timestamp_ns,
     ) {
-        publisher.publish(TelemetryKind::ProcessAlert, &alert);
+        let transition = match alert_state.lock() {
+            Ok(mut state) => state.apply(alert),
+            Err(_) => {
+                tracing::error!(
+                    "[alert] persistent alert state lock is poisoned; transition was not evaluated"
+                );
+                continue;
+            }
+        };
+        match transition {
+            Ok(Some(alert)) => {
+                if let Err(error) = publisher.publish(TelemetryKind::ProcessAlert, &alert) {
+                    tracing::error!(
+                        "[telemetry] process alert transition was not persisted: {error}"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::error!("[alert] could not persist alert transition: {error}"),
+        }
     }
     if events.try_send(event).is_err() {
+        DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
         tracing::warn!("[daemon] lifecycle event queue is full; event was dropped");
     }
 }
@@ -534,6 +571,7 @@ fn unix_socket_server(
     tree: Arc<DashMap<i32, ProcessNode>>,
     rx: Arc<crossbeam_channel::Receiver<ProcessEvent>>,
     running: Arc<AtomicBool>,
+    publisher: Arc<TelemetryPublisher>,
 ) {
     let runtime_dir = crate::config::daemon_runtime_dir();
     if let Err(error) = std::fs::create_dir_all(&runtime_dir) {
@@ -582,7 +620,7 @@ fn unix_socket_server(
 
     while running.load(Ordering::Relaxed) {
         if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-            write_health("ready");
+            write_health("ready", &publisher);
             last_heartbeat = Instant::now();
         }
         // Use select-like timeout via accept with a 1s deadline
@@ -613,7 +651,7 @@ fn unix_socket_server(
     if !crate::config::daemon_socket_is_abstract() {
         let _ = std::fs::remove_file(&socket_path);
     }
-    write_health("stopped");
+    write_health("stopped", &publisher);
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -634,13 +672,20 @@ pub fn run_daemon(config: crate::config::Config) -> i32 {
                 return 2;
             }
         };
+    let alert_state = match AlertStore::open(crate::alert::default_path()) {
+        Ok(state) => Arc::new(Mutex::new(state)),
+        Err(error) => {
+            eprintln!("❌ Could not load persistent alert state: {error}");
+            return 2;
+        }
+    };
     tracing_subscriber::fmt()
         .with_target(false)
         .with_thread_ids(false)
         .init();
 
     tracing::info!("✨ SysPilot Daemon starting");
-    write_health("starting");
+    write_health("starting", &publisher);
 
     let tree: Arc<DashMap<i32, ProcessNode>> = Arc::new(DashMap::new());
     scan_proc(&tree);
@@ -654,14 +699,23 @@ pub fn run_daemon(config: crate::config::Config) -> i32 {
     let run_nl = Arc::clone(&running);
     let publisher_nl = Arc::clone(&publisher);
     let alerts_nl = Arc::clone(&alerts);
+    let alert_state_nl = Arc::clone(&alert_state);
     let nl_thread = std::thread::spawn(move || {
-        netlink_listener(tree_nl, Arc::new(tx), run_nl, publisher_nl, alerts_nl);
+        netlink_listener(
+            tree_nl,
+            Arc::new(tx),
+            run_nl,
+            publisher_nl,
+            alerts_nl,
+            alert_state_nl,
+        );
     });
 
     let tree_sock = Arc::clone(&tree);
     let run_sock = Arc::clone(&running);
+    let publisher_sock = Arc::clone(&publisher);
     let sock_thread = std::thread::spawn(move || {
-        unix_socket_server(tree_sock, rx, run_sock);
+        unix_socket_server(tree_sock, rx, run_sock, publisher_sock);
     });
 
     nl_thread.join().ok();

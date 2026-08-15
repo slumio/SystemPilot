@@ -1,0 +1,161 @@
+use crate::config::Config;
+use crate::error::{AppError, AppResult};
+use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FleetEnrollment {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub node_id: String,
+    pub credential: String,
+    pub enrolled_at_unix_nanos: u64,
+    pub policy_source: String,
+    pub upload_scope: Vec<String>,
+    pub last_acknowledgement_unix_nanos: Option<u64>,
+}
+
+impl FleetEnrollment {
+    pub fn validate(&self) -> AppResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.node_id.trim().is_empty() || self.credential.trim().is_empty() {
+            return Err(AppError::Validation(
+                "fleet enrollment requires a node ID and credential".into(),
+            ));
+        }
+        let endpoint = reqwest::Url::parse(&self.endpoint)
+            .map_err(|error| AppError::Validation(format!("invalid fleet endpoint: {error}")))?;
+        if endpoint.scheme() != "https" {
+            return Err(AppError::Validation(
+                "hosted fleet enrollment requires an HTTPS endpoint".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+pub fn enroll(
+    config: &mut Config,
+    endpoint: String,
+    node_id: String,
+    credential: String,
+) -> AppResult<()> {
+    let enrollment = FleetEnrollment {
+        enabled: true,
+        endpoint: endpoint.clone(),
+        node_id: node_id.clone(),
+        credential: credential.clone(),
+        enrolled_at_unix_nanos: now_ns(),
+        policy_source: "local_enrollment".into(),
+        upload_scope: vec![
+            "process_lifecycle".into(),
+            "process_alert".into(),
+            "health".into(),
+        ],
+        last_acknowledgement_unix_nanos: None,
+    };
+    enrollment.validate()?;
+    config.fleet = enrollment;
+    config.distributed_telemetry.enabled = true;
+    config.distributed_telemetry.endpoint = endpoint;
+    config.distributed_telemetry.node_id = node_id;
+    config.distributed_telemetry.bearer_token = credential;
+    crate::config::validate(config)
+}
+
+pub fn disable(config: &mut Config) {
+    let owns_destination = config.fleet.enabled
+        && config.distributed_telemetry.endpoint == config.fleet.endpoint
+        && config.distributed_telemetry.node_id == config.fleet.node_id;
+    if owns_destination {
+        config.distributed_telemetry.enabled = false;
+        config.distributed_telemetry.bearer_token.clear();
+    }
+    config.fleet.enabled = false;
+    config.fleet.credential.clear();
+}
+
+pub fn print_status(config: &Config) {
+    if !config.fleet.enabled {
+        println!("Fleet enrollment: disabled");
+        println!("Local diagnostics remain available.");
+        return;
+    }
+    println!("Fleet enrollment: enabled");
+    println!("Endpoint: {}", config.fleet.endpoint);
+    println!("Node ID: {}", config.fleet.node_id);
+    println!("Policy source: {}", config.fleet.policy_source);
+    println!("Upload scope: {}", config.fleet.upload_scope.join(", "));
+    println!("Credential: configured (not displayed)");
+    let exporter = std::fs::read_to_string(crate::config::daemon_health_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|health| health.get("exporter").cloned());
+    if let Some(exporter) = &exporter {
+        println!(
+            "Delivery: queued={} sent={} retried={} rejected={} dropped={} spool_bytes={} quarantined={} persistence_failures={}",
+            exporter["queued"].as_u64().unwrap_or(0),
+            exporter["sent"].as_u64().unwrap_or(0),
+            exporter["retried"].as_u64().unwrap_or(0),
+            exporter["rejected"].as_u64().unwrap_or(0),
+            exporter["dropped"].as_u64().unwrap_or(0),
+            exporter["spool_bytes"].as_u64().unwrap_or(0),
+            exporter["quarantined"].as_u64().unwrap_or(0),
+            exporter["persistence_failures"].as_u64().unwrap_or(0),
+        );
+    } else {
+        println!("Delivery: unavailable; daemon health has no exporter report");
+    }
+    let last_ack = exporter
+        .as_ref()
+        .and_then(|value| value["last_acknowledgement_unix_nanos"].as_u64())
+        .or(config.fleet.last_acknowledgement_unix_nanos);
+    match last_ack {
+        Some(value) => println!("Last acknowledgement: {value} ns since Unix epoch"),
+        None => println!("Last acknowledgement: none observed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn enrollment_requires_https() {
+        let mut cfg = Config::default();
+        assert!(enroll(
+            &mut cfg,
+            "http://fleet.example/ingest".into(),
+            "node".into(),
+            "token".into()
+        )
+        .is_err());
+    }
+    #[test]
+    fn enrollment_uses_public_export_destination_and_disable_clears_secrets() {
+        let mut cfg = Config::default();
+        enroll(
+            &mut cfg,
+            "https://fleet.example/ingest".into(),
+            "node-a".into(),
+            "secret".into(),
+        )
+        .unwrap();
+        assert!(cfg.distributed_telemetry.enabled);
+        assert_eq!(cfg.distributed_telemetry.endpoint, cfg.fleet.endpoint);
+        disable(&mut cfg);
+        assert!(!cfg.fleet.enabled);
+        assert!(!cfg.distributed_telemetry.enabled);
+        assert!(cfg.fleet.credential.is_empty());
+        assert!(cfg.distributed_telemetry.bearer_token.is_empty());
+    }
+}

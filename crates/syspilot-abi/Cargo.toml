@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Stable allocation-free kernel/userspace event ABI for SysPilot"
 license = "MIT"
-repository = "https://github.com/slumio/g"
-homepage = "https://github.com/slumio/g"
+repository = "https://github.com/slumio/SystemPilot"
+homepage = "https://github.com/slumio/SystemPilot"
 
 [lib]
 path = "src/lib.rs"

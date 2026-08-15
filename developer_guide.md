@@ -13,6 +13,8 @@ Use `cargo build --release` for a release build. The executable is `target/relea
 
 ## Code map
 
+The authoritative responsibility and dependency rules are in [Engineering architecture](docs/ENGINEERING.md). New code must keep process exits and rendering at the CLI boundary, return typed failures from adapters, and avoid introducing AI, fleet, or database dependencies into local diagnostics.
+
 Start with `src/main.rs` for CLI behavior and `src/lib.rs` for library exports. Core functionality is split into focused Rust modules:
 
 - `daemon.rs`: Netlink lifecycle events and UNIX socket server.

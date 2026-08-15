@@ -74,11 +74,19 @@ syspilot status
 syspilot ask "Why is Linux load average high?"
 ```
 
-The installer requires Linux, `curl`, `tar`, and a Rust toolchain with Cargo. It downloads the source archive over HTTPS, installs with the committed lockfile, and atomically updates `~/.local/bin/syspilot` so an older binary cannot remain first on `PATH`. Review [install.sh](install.sh) before piping it to a shell.
+The installer requires Linux plus `curl`, `tar`, and SHA-256 tooling. It downloads the selected release binary, verifies its published checksum, and atomically updates `~/.local/bin/syspilot`. Missing or invalid release assets are hard failures; source installation is a separate, explicit workflow. Review [install.sh](install.sh) before piping it to a shell.
+
+On x86_64 and ARM64, the installer first looks for an architecture-specific release archive and its SHA-256 file. It installs that binary only after verification. If a matching release asset or checksum is unavailable, installation fails without changing the existing binary. Set `SYSPILOT_VERSION=vX.Y.Z` to select a release instead of `latest`.
+
+Generate native shell completions with:
+
+```bash
+syspilot completions bash
+syspilot completions zsh
+syspilot completions fish
+```
 
 `setup` creates the local configuration and shell hook, offers Gemini or Ollama setup, and installs a copy of the running binary in `~/.local/bin` when needed. It does not change your shell profile. If `~/.local/bin` is not already on your `PATH`, it prints the exact export line to add.
-
-`SYSPILOT_REF` can select an existing branch or release tag. The project does not currently publish a `v0.1.0` tag, so use the default command above.
 
 ### Build from source instead
 
@@ -283,7 +291,7 @@ Disable export:
 ./target/release/syspilot config telemetry disable
 ```
 
-The exporter uses a bounded in-memory queue. It batches messages, retries failed batches according to `export_policy`, and logs an error when a batch is dropped after its retry budget. It does not persist unsent telemetry to disk and therefore does not guarantee delivery during process termination, queue overflow, or prolonged collector failure.
+The exporter redacts each envelope before atomically appending it to an owner-only disk spool. The default bound is 512 MiB or seven days. Bounded in-memory notifications only wake the delivery worker; notification saturation cannot lose persisted records. Failed batches remain durable for replay across reconnects and daemon restarts, with exponential backoff, jitter, and collector-directed retry timing. Spool pressure, quarantine, persistence failures, retries, and collector rejections are visible in daemon health and fleet status.
 
 ### Add process-name alerts
 
@@ -296,8 +304,14 @@ The exporter uses a bounded in-memory queue. It batches messages, retries failed
 
 - `exact` matches the complete process name reported by the kernel/procfs.
 - `prefix` matches process names that begin with the configured text.
-- A matching lifecycle event produces a `process_alert` envelope in addition to the `process_lifecycle` envelope.
-- Rules are evaluated for lifecycle events. They do not poll for process health and do not perform any local notification or remediation.
+- FORK or EXEC opens a persistent `firing` alert; EXIT resolves an existing alert. Repeated events in the same state are deduplicated.
+- Alert state is atomically stored in `~/.syspilot/alerts-v1.json` with owner-only permissions and recovered after daemon restart.
+- Use `syspilot alerts list`, `acknowledge`, `resolve`, and `suppress` to manage lifecycle state. Acknowledged alerts stay acknowledged until exit or explicit change; suppressed alerts require explicit release.
+- Rules are deterministic and independent of AI. They do not execute remediation commands.
+
+### Fleet control-plane database
+
+Fleet inventory, ingestion deduplication, sequence gaps, shared cases, alert state, RBAC, retention, deletion requests, and immutable audit events use the optional PostgreSQL control-plane schema. Agents never connect to the database and local operation remains independent. See [Fleet control-plane database](docs/FLEET_CONTROL_PLANE.md) for fail-closed setup and mandatory tenant transaction rules.
 
 ### Envelope contract
 
@@ -343,6 +357,15 @@ SysPilot validates the endpoint, node ID, rule IDs, and policy before starting t
 ## Configuration reference
 
 Configuration is stored at `~/.syspilot/config.json`. Do not commit this file when it contains credentials.
+
+Create an inspectable local support artifact with:
+
+```bash
+syspilot support bundle create
+syspilot support bundle create ./syspilot-support.json
+```
+
+The JSON bundle is written owner-only and never uploaded automatically. Credential fields and configured sensitive context are redacted before the atomic write. Every component is marked `available`, `unavailable`, or `failed`; an incomplete bundle is still preserved for inspection but the command exits non-zero so partial collection cannot look successful.
 
 | Field | Meaning |
 |---|---|

@@ -18,6 +18,7 @@ fn restore_env_var(name: &str, previous: Option<std::ffi::OsString>) {
 #[test]
 fn default_config_fields() {
     let c = Config::default();
+    assert_eq!(c.schema_version, config::config_schema_version());
     assert_eq!(c.active_provider, "gemini");
     assert_eq!(c.gemini_model, "gemini-3.6-flash");
     assert_eq!(c.ollama_url, "http://localhost:11434");
@@ -34,6 +35,7 @@ fn default_config_fields() {
 #[test]
 fn config_serialises_and_deserialises() {
     let original = Config {
+        schema_version: config::config_schema_version(),
         active_provider: "ollama".to_string(),
         gemini_api_key: "key123".to_string(),
         gemini_model: "gemini-3.6-flash".to_string(),
@@ -48,6 +50,7 @@ fn config_serialises_and_deserialises() {
         ai_connect_timeout_seconds: 15,
         syspilot_url: "https://api.syspilot.dev/v1/chat/completions".to_string(),
         distributed_telemetry: Default::default(),
+        fleet: Default::default(),
     };
 
     let json = serde_json::to_string_pretty(&original).unwrap();
@@ -101,7 +104,7 @@ fn save_and_load_roundtrip() {
     };
     config::save(&cfg).expect("save failed");
 
-    let loaded = config::load();
+    let loaded = config::load_checked().unwrap();
     assert_eq!(loaded.active_provider, "syspilot");
     assert_eq!(loaded.gemini_api_key, "abc");
     assert_eq!(loaded.ollama_model, "mistral");
@@ -124,45 +127,33 @@ fn gemini_api_key_env_override() {
     env::set_var("HOME", tmp.path());
     env::set_var("GEMINI_API_KEY", "env_key_xyz");
 
-    let cfg = config::load();
+    let cfg = config::load_checked().unwrap();
     assert_eq!(cfg.gemini_api_key, "env_key_xyz");
 
     restore_env_var("HOME", orig_home);
     restore_env_var("GEMINI_API_KEY", orig_gemini_key);
 }
 
-// ── Gemini model sanitisation ─────────────────────────────────────────────────
+// ── Gemini model migration and validation ─────────────────────────────────────
 
 #[test]
-fn bad_gemini_model_replaced_with_default() {
-    // A model named just "gemini" (no dash, no slash) should be replaced
-    let json = r#"{"gemini_model": "gemini"}"#;
-    let c: Config = serde_json::from_str(json).unwrap();
-    // Sanitisation happens inside config::load(), not serde — simulate it
-    let sanitised = if c.gemini_model.is_empty()
-        || c.gemini_model == "gemini"
-        || (!c.gemini_model.contains('/') && !c.gemini_model.contains('-'))
-    {
-        "gemini-3.6-flash".to_string()
-    } else {
-        c.gemini_model.clone()
+fn invalid_model_in_current_schema_fails_closed() {
+    let config = Config {
+        gemini_model: "gemini".into(),
+        ..Config::default()
     };
-    assert_eq!(sanitised, "gemini-3.6-flash");
+    let error = config::validate(&config).unwrap_err().to_string();
+    assert!(error.contains("invalid Gemini model"));
 }
 
 #[test]
 fn valid_gemini_model_unchanged() {
-    let json = r#"{"gemini_model": "gemini-1.5-pro"}"#;
-    let c: Config = serde_json::from_str(json).unwrap();
-    let sanitised = if c.gemini_model.is_empty()
-        || c.gemini_model == "gemini"
-        || (!c.gemini_model.contains('/') && !c.gemini_model.contains('-'))
-    {
-        "gemini-3.6-flash".to_string()
-    } else {
-        c.gemini_model.clone()
+    let config = Config {
+        gemini_model: "gemini-1.5-pro".into(),
+        ..Config::default()
     };
-    assert_eq!(sanitised, "gemini-1.5-pro");
+    config::validate(&config).unwrap();
+    assert_eq!(config.gemini_model, "gemini-1.5-pro");
 }
 
 #[test]
@@ -183,6 +174,115 @@ fn retired_gemini_model_is_migrated_when_loaded() {
 
     let loaded = config::load_checked().unwrap();
     assert_eq!(loaded.gemini_model, "gemini-3.6-flash");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(persisted["gemini_model"], "gemini-3.6-flash");
+    assert_eq!(
+        fs::read(directory.path().join("config.pre-v1.json")).unwrap(),
+        br#"{"gemini_model":"gemini-2.0-flash"}"#
+    );
+
+    restore_env_var("SYSPILOT_HOME", old_home);
+    restore_env_var("GEMINI_API_KEY", old_key);
+}
+
+#[test]
+fn saved_configuration_and_directory_are_owner_only() {
+    use std::env;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().expect("environment lock poisoned");
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("syspilot");
+    let old_home = env::var_os("SYSPILOT_HOME");
+    env::set_var("SYSPILOT_HOME", &home);
+
+    config::save(&Config::default()).unwrap();
+    assert_eq!(
+        fs::metadata(home.join("config.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    restore_env_var("SYSPILOT_HOME", old_home);
+}
+
+#[test]
+fn unversioned_config_is_backed_up_and_migrated_before_env_overrides() {
+    let _env_lock = ENV_LOCK.lock().expect("environment lock poisoned");
+    let directory = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("SYSPILOT_HOME");
+    let old_key = std::env::var_os("GEMINI_API_KEY");
+    std::env::set_var("SYSPILOT_HOME", directory.path());
+    std::env::set_var("GEMINI_API_KEY", "runtime-only-key");
+    let original = br#"{"active_provider":"ollama","gemini_api_key":"disk-key"}"#;
+    fs::write(directory.path().join("config.json"), original).unwrap();
+
+    let loaded = config::load_checked().unwrap();
+    assert_eq!(loaded.schema_version, config::config_schema_version());
+    assert_eq!(loaded.gemini_api_key, "runtime-only-key");
+    let backup = directory.path().join("config.pre-v1.json");
+    assert_eq!(fs::read(&backup).unwrap(), original);
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(migrated["schema_version"], config::config_schema_version());
+    assert_eq!(migrated["gemini_api_key"], "disk-key");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    restore_env_var("SYSPILOT_HOME", old_home);
+    restore_env_var("GEMINI_API_KEY", old_key);
+}
+
+#[test]
+fn newer_config_schema_fails_closed() {
+    let _env_lock = ENV_LOCK.lock().expect("environment lock poisoned");
+    let directory = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("SYSPILOT_HOME");
+    std::env::set_var("SYSPILOT_HOME", directory.path());
+    fs::write(
+        directory.path().join("config.json"),
+        r#"{"schema_version":999}"#,
+    )
+    .unwrap();
+    let error = config::load_checked().unwrap_err().to_string();
+    assert!(error.contains("newer than supported"));
+    assert!(!directory.path().join("config.pre-v1.json").exists());
+    restore_env_var("SYSPILOT_HOME", old_home);
+}
+
+#[test]
+fn rollback_preserves_current_file_and_restores_pre_migration_bytes() {
+    let _env_lock = ENV_LOCK.lock().expect("environment lock poisoned");
+    let directory = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("SYSPILOT_HOME");
+    let old_key = std::env::var_os("GEMINI_API_KEY");
+    std::env::set_var("SYSPILOT_HOME", directory.path());
+    std::env::remove_var("GEMINI_API_KEY");
+    let original = br#"{"active_provider":"ollama"}"#;
+    let active = directory.path().join("config.json");
+    fs::write(&active, original).unwrap();
+    let mut migrated = config::load_checked().unwrap();
+    migrated.active_provider = "gemini".into();
+    config::save(&migrated).unwrap();
+    let current_before_rollback = fs::read(&active).unwrap();
+
+    config::rollback_previous().unwrap();
+    assert_eq!(fs::read(&active).unwrap(), original);
+    assert_eq!(
+        fs::read(directory.path().join("config.pre-rollback-v1.json")).unwrap(),
+        current_before_rollback
+    );
 
     restore_env_var("SYSPILOT_HOME", old_home);
     restore_env_var("GEMINI_API_KEY", old_key);

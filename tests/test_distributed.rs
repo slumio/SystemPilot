@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use syspilot::distributed::{
-    DistributedTelemetryConfig, ExportPolicy, ProcessAlertEngine, ProcessAlertRule,
-    ProcessNameMatch, TelemetryEnvelope, TelemetryKind, TELEMETRY_SCHEMA_VERSION,
+    preview_envelope, redact_value, DistributedTelemetryConfig, ExportPolicy, ProcessAlertEngine,
+    ProcessAlertRule, ProcessNameMatch, RedactionPolicy, TelemetryEnvelope, TelemetryKind,
+    TELEMETRY_SCHEMA_VERSION,
 };
 
 fn envelope() -> TelemetryEnvelope {
@@ -75,4 +76,60 @@ fn exact_and_prefix_process_rules_are_evaluated() {
     assert_eq!(engine.evaluate("postgres", 10, 1, "EXEC", 1).len(), 1);
     assert_eq!(engine.evaluate("api-worker", 11, 1, "EXEC", 1).len(), 1);
     assert!(engine.evaluate("redis", 12, 1, "EXEC", 1).is_empty());
+}
+
+#[test]
+fn redaction_removes_nested_sensitive_fields_but_preserves_shape() {
+    let mut payload = serde_json::json!({
+        "process": { "name": "api", "args": ["--token", "secret"], "env": ["PASSWORD=secret"], "executable_path": "/home/alice/api" },
+        "connection": { "remote_ip": "10.0.0.7" },
+        "source": "password = secret",
+        "safe": "retained",
+        "summary": "mounted /dev/sda1 at /srv/data",
+        "peer": "connected to 10.0.0.8"
+    });
+    redact_value(&mut payload, &RedactionPolicy::default());
+    assert_eq!(payload["process"]["args"], "[REDACTED]");
+    assert_eq!(payload["process"]["env"], "[REDACTED]");
+    assert_eq!(payload["process"]["executable_path"], "[REDACTED]");
+    assert_eq!(payload["connection"]["remote_ip"], "[REDACTED]");
+    assert_eq!(payload["source"], "[REDACTED]");
+    assert_eq!(payload["safe"], "retained");
+    assert_eq!(payload["summary"], "[REDACTED]");
+    assert_eq!(payload["peer"], "[REDACTED]");
+}
+
+#[test]
+fn individual_redaction_classes_can_be_disabled() {
+    let policy = RedactionPolicy {
+        paths: false,
+        ..Default::default()
+    };
+    let mut payload = serde_json::json!({"path":"/srv/api", "username":"alice"});
+    redact_value(&mut payload, &policy);
+    assert_eq!(payload["path"], "/srv/api");
+    assert_eq!(payload["username"], "[REDACTED]");
+}
+
+#[test]
+fn preview_is_redacted_even_when_export_is_disabled() {
+    let config = DistributedTelemetryConfig {
+        node_id: "node-a".into(),
+        attributes: BTreeMap::from([
+            ("username".into(), "alice".into()),
+            ("environment".into(), "prod".into()),
+        ]),
+        ..Default::default()
+    };
+    let envelope = preview_envelope(
+        &config,
+        TelemetryKind::ProcessSnapshot,
+        &serde_json::json!({"pid":42,"env":["TOKEN=secret"],"name":"api"}),
+    )
+    .unwrap();
+    assert_eq!(envelope.payload["env"], "[REDACTED]");
+    assert_eq!(envelope.payload["name"], "api");
+    assert_eq!(envelope.attributes["username"], "[REDACTED]");
+    assert_eq!(envelope.attributes["environment"], "prod");
+    assert_eq!(envelope.sequence, 0);
 }

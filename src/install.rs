@@ -209,7 +209,17 @@ pub fn uninstall() -> bool {
 
 pub fn status() -> bool {
     let dir = config::get_syspilot_dir();
+    println!(
+        "Version: {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("SYSPILOT_BUILD_COMMIT")
+    );
+    match std::env::current_exe() {
+        Ok(path) => println!("Active binary: {}", path.display()),
+        Err(error) => println!("⚠️  Active binary: unavailable ({error})"),
+    }
     println!("SysPilot home: {}", dir.display());
+    println!("Daemon socket: {}", config::daemon_socket_label());
     let hook = dir.join("syspilot.sh");
     println!(
         "{} shell hook: {}",
@@ -235,7 +245,13 @@ pub fn status() -> bool {
     }
     match config::load_checked() {
         Ok(cfg) => {
-            println!("✅ AI provider: {}", cfg.active_provider);
+            let model = match cfg.active_provider.as_str() {
+                "gemini" => &cfg.gemini_model,
+                "ollama" => &cfg.ollama_model,
+                "syspilot" => &cfg.syspilot_model,
+                _ => "unknown",
+            };
+            println!("✅ AI provider: {} (model {})", cfg.active_provider, model);
             println!(
                 "{} Distributed telemetry",
                 if cfg.distributed_telemetry.enabled {
@@ -261,6 +277,53 @@ pub fn status() -> bool {
         Err(_) => println!(
             "ℹ️  Daemon: not running. Start with `syspilot daemon` or install the systemd unit."
         ),
+    }
+    if let Ok(content) = fs::read_to_string(config::daemon_health_path()) {
+        if let Ok(health) = serde_json::from_str::<serde_json::Value>(&content) {
+            println!(
+                "Netlink state: {}",
+                health["netlink_state"].as_str().unwrap_or("unknown")
+            );
+            println!(
+                "Dropped lifecycle events: {}",
+                health["dropped_events"].as_u64().unwrap_or(0)
+            );
+            if let Some(exporter) = health["exporter"].as_object() {
+                println!(
+                    "Exporter: queued={} sent={} retried={} rejected={} dropped={} spool_bytes={} quarantined={} persistence_failures={}",
+                    exporter.get("queued").and_then(|v| v.as_u64()).unwrap_or(0),
+                    exporter.get("sent").and_then(|v| v.as_u64()).unwrap_or(0),
+                    exporter
+                        .get("retried")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    exporter
+                        .get("rejected")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    exporter
+                        .get("dropped")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    exporter.get("spool_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                    exporter.get("quarantined").and_then(|v| v.as_u64()).unwrap_or(0),
+                    exporter.get("persistence_failures").and_then(|v| v.as_u64()).unwrap_or(0),
+                );
+                println!(
+                    "Last telemetry acknowledgement: {}",
+                    exporter
+                        .get("last_acknowledgement_unix_nanos")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "none".into())
+                );
+            } else {
+                println!(
+                    "Dropped telemetry messages: {}",
+                    health["dropped_telemetry"].as_u64().unwrap_or(0)
+                );
+            }
+        }
     }
     true
 }

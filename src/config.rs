@@ -1,5 +1,7 @@
+use crate::config_migration::{self, CURRENT_CONFIG_SCHEMA_VERSION};
 use crate::distributed::DistributedTelemetryConfig;
 use crate::error::{AppError, AppResult};
+use crate::fleet::FleetEnrollment;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::os::linux::net::SocketAddrExt;
@@ -8,6 +10,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_config_schema_version")]
+    pub schema_version: u64,
+
     #[serde(default = "default_provider")]
     pub active_provider: String,
 
@@ -51,6 +56,13 @@ pub struct Config {
 
     #[serde(default)]
     pub distributed_telemetry: DistributedTelemetryConfig,
+
+    #[serde(default)]
+    pub fleet: FleetEnrollment,
+}
+
+fn default_config_schema_version() -> u64 {
+    CURRENT_CONFIG_SCHEMA_VERSION
 }
 
 fn default_provider() -> String {
@@ -90,6 +102,7 @@ fn default_syspilot_url() -> String {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
             active_provider: default_provider(),
             gemini_api_key: String::new(),
             gemini_model: default_gemini_model(),
@@ -104,6 +117,7 @@ impl Default for Config {
             ai_connect_timeout_seconds: default_ai_connect_timeout_seconds(),
             syspilot_url: default_syspilot_url(),
             distributed_telemetry: DistributedTelemetryConfig::default(),
+            fleet: FleetEnrollment::default(),
         }
     }
 }
@@ -175,7 +189,33 @@ pub fn daemon_health_path() -> PathBuf {
 }
 
 pub fn validate(cfg: &Config) -> AppResult<()> {
+    if cfg.schema_version != CURRENT_CONFIG_SCHEMA_VERSION {
+        return Err(AppError::Validation(format!(
+            "configuration schema {} is not supported; expected {}",
+            cfg.schema_version, CURRENT_CONFIG_SCHEMA_VERSION
+        )));
+    }
+    if cfg.gemini_model.is_empty()
+        || cfg.gemini_model == "gemini"
+        || cfg.gemini_model == "gemini-2.0-flash"
+        || (!cfg.gemini_model.contains('/') && !cfg.gemini_model.contains('-'))
+    {
+        return Err(AppError::Validation(format!(
+            "invalid Gemini model '{}'; set an explicit supported model",
+            cfg.gemini_model
+        )));
+    }
     cfg.distributed_telemetry.validate()?;
+    cfg.fleet.validate()?;
+    if cfg.fleet.enabled
+        && (!cfg.distributed_telemetry.enabled
+            || cfg.distributed_telemetry.endpoint != cfg.fleet.endpoint
+            || cfg.distributed_telemetry.node_id != cfg.fleet.node_id)
+    {
+        return Err(AppError::Validation(
+            "fleet enrollment and telemetry destination are inconsistent".into(),
+        ));
+    }
     if cfg.ai_request_timeout_seconds == 0 || cfg.ai_connect_timeout_seconds == 0 {
         return Err(AppError::Validation(
             "AI request and connect timeouts must be greater than zero".into(),
@@ -191,8 +231,7 @@ pub fn validate(cfg: &Config) -> AppResult<()> {
 pub fn load_checked() -> AppResult<Config> {
     let path = get_syspilot_dir().join("config.json");
     let mut cfg = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|error| AppError::io("could not read SysPilot configuration", error))?;
+        let content = config_migration::load_and_migrate(&path)?;
         serde_json::from_str(&content).map_err(|source| AppError::ConfigParse {
             path: path.clone(),
             source,
@@ -213,15 +252,6 @@ pub fn load_checked() -> AppResult<Config> {
         }
     }
 
-    // Sanitize gemini model name
-    if cfg.gemini_model.is_empty()
-        || cfg.gemini_model == "gemini"
-        || cfg.gemini_model == "gemini-2.0-flash"
-        || (!cfg.gemini_model.contains('/') && !cfg.gemini_model.contains('-'))
-    {
-        cfg.gemini_model = default_gemini_model();
-    }
-
     if !["active", "gemini", "ollama"].contains(&cfg.embedding_provider.as_str()) {
         return Err(AppError::Validation(format!(
             "invalid embedding provider '{}'; use active, gemini, or ollama",
@@ -234,27 +264,19 @@ pub fn load_checked() -> AppResult<Config> {
     Ok(cfg)
 }
 
-/// Backward-compatible convenience loader for interactive paths. New command
-/// boundaries should prefer `load_checked` when a bad config must stop work.
-pub fn load() -> Config {
-    match load_checked() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("⚠️  {}. Using default configuration.", error);
-            Config::default()
-        }
-    }
-}
-
 pub fn save(cfg: &Config) -> AppResult<()> {
-    let dir = get_syspilot_dir();
-    std::fs::create_dir_all(&dir).map_err(|error| {
-        AppError::io("could not create SysPilot configuration directory", error)
-    })?;
-    let path = dir.join("config.json");
-    let json = serde_json::to_string_pretty(cfg).map_err(|error| {
+    validate(cfg)?;
+    let path = get_syspilot_dir().join("config.json");
+    let json = serde_json::to_vec_pretty(cfg).map_err(|error| {
         AppError::Protocol(format!("could not encode SysPilot configuration: {error}"))
     })?;
-    std::fs::write(&path, json)
-        .map_err(|error| AppError::io("could not write SysPilot configuration", error))
+    config_migration::atomic_write(&path, &json)
+}
+
+pub const fn config_schema_version() -> u64 {
+    CURRENT_CONFIG_SCHEMA_VERSION
+}
+
+pub fn rollback_previous() -> AppResult<PathBuf> {
+    config_migration::rollback(&get_syspilot_dir().join("config.json"))
 }

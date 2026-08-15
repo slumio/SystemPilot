@@ -27,3 +27,63 @@ jobs:
           name: syspilot-linux-x86_64
           path: target/release/syspilot
           if-no-files-found: error
+
+  fleet-schema:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_PASSWORD: migration-test
+          POSTGRES_DB: syspilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d syspilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - name: Apply and reapply fleet schema
+        env:
+          FLEET_DB_ALLOW_INSECURE: "1"
+          FLEET_DATABASE_URL: postgresql://postgres:migration-test@localhost:5432/syspilot?sslmode=disable
+        run: |
+          deploy/fleet/setup-db.sh
+          deploy/fleet/setup-db.sh
+      - name: Prove tenant isolation and immutable audit history
+        env:
+          PGPASSWORD: migration-test
+        run: |
+          psql -h localhost -U postgres -d syspilot --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE syspilot_runtime LOGIN PASSWORD 'runtime-test';
+          GRANT syspilot_control_app TO syspilot_runtime;
+          INSERT INTO syspilot_control.tenants(tenant_id, name) VALUES
+            ('00000000-0000-0000-0000-000000000001', 'tenant-one'),
+            ('00000000-0000-0000-0000-000000000002', 'tenant-two');
+          SQL
+          PGPASSWORD=runtime-test psql -h localhost -U syspilot_runtime -d syspilot --set ON_ERROR_STOP=1 <<'SQL'
+          BEGIN;
+          SET LOCAL syspilot.tenant_id = '00000000-0000-0000-0000-000000000001';
+          INSERT INTO syspilot_control.nodes(tenant_id,node_id,agent_version,protocol_version)
+          VALUES ('00000000-0000-0000-0000-000000000001','node-one','test',1);
+          INSERT INTO syspilot_control.audit_events(tenant_id,action,target_type)
+          VALUES ('00000000-0000-0000-0000-000000000001','test.create','node');
+          COMMIT;
+          SQL
+          visible=$(PGPASSWORD=runtime-test psql -h localhost -U syspilot_runtime -d syspilot --tuples-only --no-align --set ON_ERROR_STOP=1 \
+            --command "BEGIN; SET LOCAL syspilot.tenant_id = '00000000-0000-0000-0000-000000000002'; SELECT count(*) FROM syspilot_control.nodes; COMMIT;" | sed -n '3p')
+          test "$visible" = "0"
+          if PGPASSWORD=runtime-test psql -h localhost -U syspilot_runtime -d syspilot --set ON_ERROR_STOP=1 \
+            --command "BEGIN; SET LOCAL syspilot.tenant_id = '00000000-0000-0000-0000-000000000001'; UPDATE syspilot_control.audit_events SET action = 'tampered'; COMMIT;"; then
+            echo "audit mutation unexpectedly succeeded" >&2
+            exit 1
+          fi
+          if PGPASSWORD=runtime-test psql -h localhost -U syspilot_runtime -d syspilot --set ON_ERROR_STOP=1 \
+            --command "SELECT * FROM syspilot_control.tenants"; then
+            echo "runtime role unexpectedly read global tenants" >&2
+            exit 1
+          fi
