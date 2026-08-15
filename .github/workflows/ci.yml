@@ -129,7 +129,9 @@ jobs:
       - name: Install Rust
         run: curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
       - name: Restricted-procfs compatible build and tests
-        run: . "$HOME/.cargo/env" && cargo test --locked --workspace
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: . "$HOME/.cargo/env" && cargo test --locked --workspace -- --test-threads=1
 
   packages:
     runs-on: ubuntu-24.04
@@ -139,6 +141,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.24.x'
+          cache: false
       - name: Build release binary
         run: cargo build --release --locked
       - name: Install pinned nfpm
