@@ -51,10 +51,12 @@ chart with an immutable image digest and the AWS endpoint:
 helm upgrade --install syspilot deploy/cloud/helm/syspilot \
   --namespace syspilot --create-namespace \
   --set image.repository=ACCOUNT.dkr.ecr.REGION.amazonaws.com/syspilot-cloud \
-  --set image.tag=VERSION \
+  --set image.digest=sha256:RELEASE_IMAGE_DIGEST \
   --set reasoning.endpoint=https://REASONING_HOST/v1/analyze \
   --set notification.endpoint=https://NOTIFICATION_HOST/v1/deliver
 ```
+
+Production rendering fails unless `image.digest` is a lowercase SHA-256 digest. `image.tag` is accepted only with `image.allowMutableTagForLocalDevelopment=true`; that override is for isolated local development.
 
 Terminate public TLS at ALB using ACM, restrict ingress with WAF, and permit
 database traffic only from collector and worker security groups. The chart does
@@ -73,6 +75,12 @@ not create secrets, public ingress, RDS, or IAM resources implicitly.
   leasing the same job concurrently.
 - Notification workers independently lease email/webhook deliveries and use
   bounded retries; the AWS endpoint performs SES or outbound webhook delivery.
+- Credential-bearing workers refuse redirects. Timeouts, 429s, 5xx replies,
+  malformed reasoning results, and transport failures enter bounded retry;
+  repeated provider failure opens a short local circuit without deleting jobs.
+- Worker crashes recover through lease expiry. Query
+  `syspilot_control.worker_delivery_health` for queue age, expired leases, and
+  permanently failed deliveries.
 - Collector saturation returns `503` and `Retry-After`. Agents retain records
   in their local spool and retry with jitter.
 

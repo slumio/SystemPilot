@@ -23,7 +23,9 @@ A `process_alert` payload includes `instance_id`, `state`, and optional `previou
 
 The agent sends `Content-Type: application/json` and optionally `Authorization: Bearer <token>`. A 2xx response with an empty body acknowledges the complete submitted batch for compatibility with schema-v1 collectors. A non-empty 2xx response must contain `accepted_message_ids`, optional `highest_accepted_sequence`, `rejected_records` with reasons, and optional `retry_after_ms`. Unknown IDs, duplicate decisions, inconsistent high-water sequences, and malformed responses do not acknowledge records. Non-2xx responses and transport failures are retried with exponential backoff and jitter. Server-directed retry timing is honored. Records are redacted before being atomically persisted and remain in the owner-only disk spool until explicitly acknowledged.
 
-Collectors should deduplicate by `(node_id, message_id)`. Sequence gaps are evidence of loss or quarantine and must be reported; sequences do not reset during normal agent restarts. Collector clocks must not replace `observed_at_unix_nanos`; ingestion time should be stored separately.
+Collectors deduplicate by `(tenant_id, node_id, message_id)` and bind that identity to a deterministic digest of the complete envelope. An exact replay is acknowledged; the same message ID with different content is rejected as `message_id_content_conflict`. Sequence gaps are evidence of loss or quarantine and must be reported; sequences do not reset during normal agent restarts.
+
+`observed_at_unix_nanos` is preserved as an integer. The cloud collector splits it into integer epoch seconds and subsecond nanoseconds, never a floating-point timestamp, and accepts dates from 2000-01-01 through 2099-12-31 UTC. Zero, overflow, and out-of-range values are rejected. Collector clocks must not replace the event timestamp; ingestion time is stored separately.
 
 ## Privacy boundary
 

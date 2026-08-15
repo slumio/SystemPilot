@@ -53,7 +53,7 @@ Ingestion must perform these actions in one transaction:
 
 1. authenticate the node using a constant-time comparison against the stored token hash and reject expired or revoked credentials;
 2. set `syspilot.tenant_id` locally;
-3. insert each envelope using `(tenant_id, node_id, message_id)` for replay deduplication and the sequence uniqueness constraint for conflict detection;
+3. insert each envelope using `(tenant_id, node_id, message_id)` plus its deterministic envelope digest; accept exact replays, reject changed content under the same ID, and use the sequence uniqueness constraint for conflicts;
 4. lock and update `node_sequence_state`, recording gaps rather than hiding them;
 5. update node `last_seen_at` and append an audit event when policy requires it;
 6. commit before returning accepted IDs, highest accepted sequence, rejections, and retry timing.
@@ -68,7 +68,7 @@ Committed envelopes create durable reasoning jobs. Run
 `syspilot-reasoning-worker` under a login that is only a member of
 `syspilot_cloud_worker`. Configure an HTTPS
 `SYSPILOT_AWS_REASONING_ENDPOINT` and its secret-injected bearer credential.
-Workers lease with `FOR UPDATE SKIP LOCKED`, retry bounded failures, and store
+Workers lease with `FOR UPDATE SKIP LOCKED`, recover expired leases after restarts, refuse credential-bearing redirects, retry bounded failures behind a short circuit, and store
 object results transactionally. The endpoint receives the redacted envelope,
 node ID, and message ID; it does not receive database credentials or tenant IDs.
 

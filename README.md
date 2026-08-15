@@ -137,7 +137,7 @@ SysPilot does not send data to an AI provider until you run `ask` or `explain`. 
 ### Gemini
 
 ```bash
-./target/release/syspilot config set-key gemini YOUR_GEMINI_API_KEY
+./target/release/syspilot config set-key gemini
 ./target/release/syspilot provider gemini
 ./target/release/syspilot ask "Explain Linux load average"
 ```
@@ -160,7 +160,7 @@ The configured Ollama URL must be a valid URL. SysPilot reports HTTP failures, c
 ### SysPilot API
 
 ```bash
-./target/release/syspilot config set-key syspilot YOUR_API_KEY
+./target/release/syspilot config set-key syspilot
 ./target/release/syspilot provider syspilot
 ```
 
@@ -277,7 +277,7 @@ Distributed telemetry is disabled by default. When enabled, the daemon sends JSO
 ### Configure export
 
 ```bash
-./target/release/syspilot config telemetry enable https://collector.example/v1/telemetry node-a YOUR_TOKEN
+./target/release/syspilot config telemetry enable https://collector.example/v1/telemetry node-a
 ./target/release/syspilot config telemetry show
 ```
 
@@ -293,7 +293,9 @@ Disable export:
 ./target/release/syspilot config telemetry disable
 ```
 
-The exporter redacts each envelope before atomically appending it to an owner-only disk spool. The default bound is 512 MiB or seven days. Bounded in-memory notifications only wake the delivery worker; notification saturation cannot lose persisted records. Failed batches remain durable for replay across reconnects and daemon restarts, with exponential backoff, jitter, and collector-directed retry timing. Spool pressure, quarantine, persistence failures, retries, and collector rejections are visible in daemon health and fleet status.
+Credential commands read from a hidden terminal prompt (or stdin when redirected); provider and fleet environment variables remain supported. Never append credentials to a command line because shell history and process inspection can expose them.
+
+The exporter redacts each envelope before atomically appending it to an owner-only disk spool. The default bound is 512 MiB or seven days. Bounded in-memory notifications only wake the delivery worker; notification saturation cannot lose persisted records. Failed batches remain durable for replay across reconnects and daemon restarts, with exponential backoff, jitter, and collector-directed retry timing. Exact message-ID replays are accepted; reuse of a message ID with changed content is rejected. Spool pressure, quarantine, persistence failures, retries, and collector rejections are visible in daemon health and fleet status.
 
 ### Add process-name alerts
 
