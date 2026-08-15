@@ -1,4 +1,10 @@
-use axum::{extract::State, http::StatusCode, routing::get, routing::post, Json, Router};
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    routing::get,
+    routing::post,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,7 +23,7 @@ struct Envelope {
     attributes: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Acknowledgement {
     accepted_message_ids: Vec<String>,
     highest_accepted_sequence: Option<u64>,
@@ -92,6 +98,7 @@ async fn serve() -> Result<(), String> {
             }),
         )
         .route("/v1/telemetry", post(ingest))
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(metrics);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
@@ -154,6 +161,7 @@ impl LoadMetrics {
 
 #[derive(Serialize)]
 struct LoadReport {
+    mode: String,
     virtual_servers: usize,
     configured_duration_seconds: u64,
     elapsed_seconds: f64,
@@ -163,6 +171,7 @@ struct LoadReport {
     envelopes: u64,
     requests_per_second: f64,
     envelopes_per_second: f64,
+    minimum_envelopes_per_second: f64,
     p50_latency_ms_upper_bound: u64,
     p95_latency_ms_upper_bound: u64,
     p99_latency_ms_upper_bound: u64,
@@ -172,18 +181,23 @@ struct LoadReport {
 
 async fn load() -> Result<(), String> {
     let endpoint = env("TARGET_URL", "http://collector:8080/v1/telemetry");
+    let mode = env("LOAD_MODE", "paced");
     let virtual_servers = parse_env("VIRTUAL_SERVERS", 100usize)?;
     let duration_seconds = parse_env("DURATION_SECONDS", 30u64)?;
     let batch_size = parse_env("BATCH_SIZE", 16usize)?;
     let requests_per_server_second = parse_env("REQUESTS_PER_SERVER_SECOND", 1u64)?;
     let max_failure_rate = parse_env("MAX_FAILURE_RATE", 0.001f64)?;
     let max_p95_ms = parse_env("MAX_P95_MS", 500u64)?;
+    let minimum_envelopes_per_second = parse_env("MIN_ENVELOPES_PER_SECOND", 0f64)?;
     if virtual_servers == 0
         || duration_seconds == 0
         || batch_size == 0
         || requests_per_server_second == 0
     {
         return Err("load settings must be greater than zero".into());
+    }
+    if !matches!(mode.as_str(), "paced" | "saturation") {
+        return Err("LOAD_MODE must be paced or saturation".into());
     }
 
     let client = reqwest::Client::builder()
@@ -193,6 +207,7 @@ async fn load() -> Result<(), String> {
         .map_err(|error| format!("could not create load client: {error}"))?;
     let metrics = Arc::new(LoadMetrics::default());
     let load_started = Instant::now();
+    let deadline = load_started + Duration::from_secs(duration_seconds);
     let interval = Duration::from_secs_f64(1.0 / requests_per_server_second as f64);
     let requests_per_server = duration_seconds
         .checked_mul(requests_per_server_second)
@@ -202,45 +217,39 @@ async fn load() -> Result<(), String> {
         let endpoint = endpoint.clone();
         let client = client.clone();
         let metrics = Arc::clone(&metrics);
+        let mode = mode.clone();
         tasks.push(tokio::spawn(async move {
             let node_id = format!("load-node-{server_index}");
             let mut sequence = 1u64;
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // Tokio intervals yield immediately once. Consume that tick so a
-            // configured N-second run sends exactly N cycles at 1 Hz.
-            ticker.tick().await;
-            for _ in 0..requests_per_server {
+            if mode == "saturation" {
+                while Instant::now() < deadline {
+                    send_batch(
+                        &client,
+                        &endpoint,
+                        &node_id,
+                        &mut sequence,
+                        batch_size,
+                        &metrics,
+                    )
+                    .await;
+                }
+            } else {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Tokio intervals yield immediately once. Consume that tick so a
+                // configured N-second run sends exactly N cycles at 1 Hz.
                 ticker.tick().await;
-                let batch: Vec<_> = (0..batch_size)
-                    .map(|_| {
-                        let current = sequence;
-                        sequence += 1;
-                        Envelope {
-                            schema_version: 1,
-                            message_id: format!("{node_id}-{current}"),
-                            node_id: node_id.clone(),
-                            sequence: current,
-                            observed_at_unix_nanos: now_ns(),
-                            kind: "process_lifecycle".into(),
-                            payload: serde_json::json!({"event_type":"EXEC","pid":current}),
-                            attributes: serde_json::Map::new(),
-                        }
-                    })
-                    .collect();
-                let started = Instant::now();
-                let result = client.post(&endpoint).json(&batch).send().await;
-                match result {
-                    Ok(response) if response.status().is_success() => {
-                        metrics.succeeded.fetch_add(1, Ordering::Relaxed);
-                        metrics
-                            .envelopes
-                            .fetch_add(batch.len() as u64, Ordering::Relaxed);
-                        metrics.observe(started.elapsed());
-                    }
-                    Ok(_) | Err(_) => {
-                        metrics.failed.fetch_add(1, Ordering::Relaxed);
-                    }
+                for _ in 0..requests_per_server {
+                    ticker.tick().await;
+                    send_batch(
+                        &client,
+                        &endpoint,
+                        &node_id,
+                        &mut sequence,
+                        batch_size,
+                        &metrics,
+                    )
+                    .await;
                 }
             }
         }));
@@ -261,8 +270,12 @@ async fn load() -> Result<(), String> {
         failed as f64 / total as f64
     };
     let p95 = metrics.percentile_ms(0.95);
-    let passed = failure_rate <= max_failure_rate && p95 <= max_p95_ms;
+    let envelopes_per_second = envelopes as f64 / elapsed_seconds;
+    let passed = failure_rate <= max_failure_rate
+        && p95 <= max_p95_ms
+        && envelopes_per_second >= minimum_envelopes_per_second;
     let report = LoadReport {
+        mode,
         virtual_servers,
         configured_duration_seconds: duration_seconds,
         elapsed_seconds,
@@ -271,7 +284,8 @@ async fn load() -> Result<(), String> {
         failed_requests: failed,
         envelopes,
         requests_per_second: succeeded as f64 / elapsed_seconds,
-        envelopes_per_second: envelopes as f64 / elapsed_seconds,
+        envelopes_per_second,
+        minimum_envelopes_per_second,
         p50_latency_ms_upper_bound: metrics.percentile_ms(0.50),
         p95_latency_ms_upper_bound: p95,
         p99_latency_ms_upper_bound: metrics.percentile_ms(0.99),
@@ -286,6 +300,54 @@ async fn load() -> Result<(), String> {
         Ok(())
     } else {
         Err("benchmark thresholds were not met".into())
+    }
+}
+
+async fn send_batch(
+    client: &reqwest::Client,
+    endpoint: &str,
+    node_id: &str,
+    sequence: &mut u64,
+    batch_size: usize,
+    metrics: &LoadMetrics,
+) {
+    let batch: Vec<_> = (0..batch_size)
+        .map(|_| {
+            let current = *sequence;
+            *sequence += 1;
+            Envelope {
+                schema_version: 1,
+                message_id: format!("{node_id}-{current}"),
+                node_id: node_id.to_string(),
+                sequence: current,
+                observed_at_unix_nanos: now_ns(),
+                kind: "process_lifecycle".into(),
+                payload: serde_json::json!({"event_type":"EXEC","pid":current}),
+                attributes: serde_json::Map::new(),
+            }
+        })
+        .collect();
+    let started = Instant::now();
+    let valid_acknowledgement = match client.post(endpoint).json(&batch).send().await {
+        Ok(response) if response.status().is_success() => response
+            .json::<Acknowledgement>()
+            .await
+            .is_ok_and(|acknowledgement| {
+                acknowledgement.accepted_message_ids.len() == batch.len()
+                    && acknowledgement.highest_accepted_sequence
+                        == batch.last().map(|record| record.sequence)
+                    && acknowledgement.rejected_records.is_empty()
+            }),
+        Ok(_) | Err(_) => false,
+    };
+    if valid_acknowledgement {
+        metrics.succeeded.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .envelopes
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+        metrics.observe(started.elapsed());
+    } else {
+        metrics.failed.fetch_add(1, Ordering::Relaxed);
     }
 }
 

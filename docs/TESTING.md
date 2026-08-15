@@ -13,7 +13,7 @@ git diff --check
 
 Unit tests cover parsing, schemas, redaction, acknowledgement validation, retry outcomes, spool recovery, monotonic sequences, alert lifecycle, configuration migration/rollback, support sanitization, case retention, causal graphs, profiling, safety rules, streaming, and collector queues. Integration tests cover public library behavior and live Linux procfs where appropriate.
 
-The `fleet-transport-benchmark` CI job additionally runs the Docker-based synthetic 1,000-server telemetry gate. See [Fleet transport benchmark](FLEET_BENCHMARK.md) for its thresholds and interpretation limits.
+The `fleet-transport-benchmark` CI job additionally runs the Docker-based synthetic 1,000-server telemetry gate. `fleet-peak-benchmark` removes pacing and enforces a minimum saturated envelope rate plus failure and p95 latency limits. See [Fleet transport benchmark](FLEET_BENCHMARK.md) for thresholds and interpretation limits.
 
 ## Functional smoke matrix
 

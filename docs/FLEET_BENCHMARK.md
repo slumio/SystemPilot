@@ -14,7 +14,7 @@ The default run simulates 1,000 servers, one request per server per second, 16 e
 
 ## CI gate
 
-The `fleet-transport-benchmark` job in `.github/workflows/ci.yml` runs the same 1,000-server scenario for every push to `dev` or `master` and for every pull request. It fails when the load process misses either threshold and uploads `fleet-benchmark.json` even after a failure, so regressions remain inspectable.
+The `fleet-transport-benchmark` job in `.github/workflows/ci.yml` runs the same 1,000-server scenario for every push to `dev` or `master` and for every pull request. The separate `fleet-peak-benchmark` job runs 16 continuously active senders with 1,024-record batches and requires at least 750,000 envelopes/second, no more than 0.1% failures, and p95 latency no greater than 100 ms. Both jobs upload their JSON report even after failure, so regressions remain inspectable.
 
 This gate intentionally uses a fixed synthetic workload. Increase the published capacity only through a reviewed change that includes the new result and runner specification; do not silently weaken latency or failure thresholds.
 
@@ -22,6 +22,14 @@ Scale one dimension at a time:
 
 ```bash
 VIRTUAL_SERVERS=5000 DURATION_SECONDS=120 \
+docker compose -f compose.fleet-benchmark.yml up --build --abort-on-container-exit --exit-code-from load
+```
+
+Run continuously in-flight saturation mode:
+
+```bash
+LOAD_MODE=saturation VIRTUAL_SERVERS=16 BATCH_SIZE=1024 \
+DURATION_SECONDS=30 MIN_ENVELOPES_PER_SECOND=750000 MAX_P95_MS=100 \
 docker compose -f compose.fleet-benchmark.yml up --build --abort-on-container-exit --exit-code-from load
 ```
 
@@ -40,6 +48,10 @@ A successful 5,000-server synthetic run means only that the stateless HTTP proto
 ### Current development baseline
 
 On an 8-thread Intel Core i5-1135G7 development machine, a direct (non-Docker) 1,000-server, 15-second run produced 15,000 successful requests, no failed requests, approximately 998 requests/second and 15,971 envelopes/second, with p95/p99 latency in the 50 ms-or-lower histogram bucket. This is a development baseline, not a production fleet certification; CI artifacts are the repeatable comparison record.
+
+The same machine's 10-second saturation sweep peaked at approximately 1,224,387 envelopes/second using 16 continuously active senders and 1,024-record batches. It completed 11,968 acknowledged requests with zero failures, p95 no greater than 20 ms, and p99 no greater than 50 ms. For comparison, 256-record batches peaked at approximately 1,160,988 envelopes/second. The configured 10,000-record maximum was slower at approximately 818,568 envelopes/second and used about 214 MiB of load-generator resident memory, demonstrating that the largest batch is not the fastest or most memory-efficient setting.
+
+These figures include JSON request generation and acknowledgement parsing. They still exclude authentication and durable database work.
 
 ## Required production scenarios
 

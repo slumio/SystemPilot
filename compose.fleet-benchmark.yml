@@ -31,12 +31,14 @@ services:
         condition: service_healthy
     environment:
       TARGET_URL: http://collector:8080/v1/telemetry
+      LOAD_MODE: ${LOAD_MODE:-paced}
       VIRTUAL_SERVERS: ${VIRTUAL_SERVERS:-1000}
       DURATION_SECONDS: ${DURATION_SECONDS:-30}
       BATCH_SIZE: ${BATCH_SIZE:-16}
       REQUESTS_PER_SERVER_SECOND: ${REQUESTS_PER_SERVER_SECOND:-1}
       MAX_FAILURE_RATE: ${MAX_FAILURE_RATE:-0.001}
       MAX_P95_MS: ${MAX_P95_MS:-500}
+      MIN_ENVELOPES_PER_SECOND: ${MIN_ENVELOPES_PER_SECOND:-0}
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
