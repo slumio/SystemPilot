@@ -16,6 +16,10 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 migration="$script_dir/postgres/001_initial.sql"
 [ -r "$migration" ] || fail "migration is missing: $migration"
 checksum=$(sha256sum "$migration" | awk '{print $1}')
+case "$checksum" in
+  ''|*[!0-9a-f]*) fail "migration checksum is not a lowercase hexadecimal SHA-256 value" ;;
+esac
+[ "${#checksum}" -eq 64 ] || fail "migration checksum has an invalid length"
 
 schema_exists=$(psql "$FLEET_DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
   --command "SELECT to_regclass('syspilot_control.schema_migrations') IS NOT NULL") || fail "could not inspect migration schema"
@@ -33,8 +37,8 @@ if [ -n "$existing" ]; then
 fi
 
 psql "$FLEET_DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=1 --file "$migration" || fail "schema migration failed and was rolled back"
-psql "$FLEET_DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=1 --set migration_checksum="$checksum" \
-  --command "INSERT INTO syspilot_control.schema_migrations(version, checksum_sha256) VALUES (1, :'migration_checksum')" \
+psql "$FLEET_DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=1 \
+  --command "INSERT INTO syspilot_control.schema_migrations(version, checksum_sha256) VALUES (1, '$checksum')" \
   >/dev/null || fail "schema was applied but migration ledger update failed; operator reconciliation is required"
 printf 'Fleet database schema version 1 applied successfully.\n'
 printf 'Next: create a LOGIN role and grant it membership in syspilot_control_app; never use the migration administrator at runtime.\n'
