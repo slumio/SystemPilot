@@ -6,6 +6,9 @@
 //! capacity and drop accounting stay explicit under contention.
 /// Canonical fleet-control schema migration, embedded for contract tests and tooling.
 pub const FLEET_SCHEMA_V1: &str = include_str!("../../../deploy/fleet/postgres/001_initial.sql");
+/// Cloud reasoning, notification, heartbeat, and usage schema migration.
+pub const FLEET_SCHEMA_V2: &str =
+    include_str!("../../../deploy/fleet/postgres/002_cloud_workloads.sql");
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -258,7 +261,7 @@ mod tests {
 
 #[cfg(test)]
 mod fleet_schema_tests {
-    use super::FLEET_SCHEMA_V1;
+    use super::{FLEET_SCHEMA_V1, FLEET_SCHEMA_V2};
 
     #[test]
     fn every_tenant_table_has_forced_row_level_security() {
@@ -297,5 +300,23 @@ mod fleet_schema_tests {
         assert!(!FLEET_SCHEMA_V1.contains("bearer_token"));
         assert!(FLEET_SCHEMA_V1.contains("audit_events_immutable"));
         assert!(FLEET_SCHEMA_V1.contains("REVOKE UPDATE, DELETE ON syspilot_control.audit_events"));
+    }
+
+    #[test]
+    fn cloud_workloads_are_tenant_isolated_and_credentials_are_not_returned() {
+        for table in [
+            "node_heartbeats",
+            "active_server_days",
+            "reasoning_jobs",
+            "reasoning_results",
+            "notification_deliveries",
+            "alert_destinations",
+        ] {
+            assert!(FLEET_SCHEMA_V2.contains(&format!("'{table}'")));
+        }
+        assert!(FLEET_SCHEMA_V2.contains("SECURITY DEFINER"));
+        assert!(FLEET_SCHEMA_V2.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text)"));
+        assert!(!FLEET_SCHEMA_V2.contains("RETURNS TABLE(tenant_id uuid, node_id text, token"));
     }
 }

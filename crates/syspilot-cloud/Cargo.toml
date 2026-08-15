@@ -1,0 +1,25 @@
+[package]
+name = "syspilot-cloud"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"] }
+hmac = "=0.12.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+sqlx-core = { version = "=0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json"] }
+sqlx-postgres = { version = "=0.8.6", default-features = false, features = ["json", "uuid"] }
+syspilot = { path = "../.." }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.22", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "=1.19.0", features = ["serde"] }
+
+[[bin]]
+name = "syspilot-reasoning-worker"
+path = "src/bin/reasoning_worker.rs"

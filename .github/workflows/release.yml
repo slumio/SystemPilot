@@ -33,6 +33,22 @@ jobs:
           rm dist/syspilot
           cd dist
           sha256sum syspilot-${{ matrix.target }}.tar.gz > syspilot-${{ matrix.target }}.tar.gz.sha256
+      - uses: goreleaser/nfpm-action@v2
+        with:
+          version: v2.41.3
+      - name: Build distribution packages
+        env:
+          SYSPILOT_PACKAGE_ARCH: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'amd64' || 'arm64' }}
+          SYSPILOT_PACKAGE_BINARY: target/${{ matrix.target }}/release/syspilot
+          SYSPILOT_PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          package_version="${SYSPILOT_PACKAGE_VERSION#v}"
+          export SYSPILOT_PACKAGE_VERSION="$package_version"
+          deploy/packages/build.sh deb "dist/syspilot-${package_version}-${SYSPILOT_PACKAGE_ARCH}.deb"
+          rpm_arch="$SYSPILOT_PACKAGE_ARCH"
+          [ "$rpm_arch" != amd64 ] || rpm_arch=x86_64
+          [ "$rpm_arch" != arm64 ] || rpm_arch=aarch64
+          SYSPILOT_PACKAGE_ARCH="$rpm_arch" deploy/packages/build.sh rpm "dist/syspilot-${package_version}-${rpm_arch}.rpm"
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:

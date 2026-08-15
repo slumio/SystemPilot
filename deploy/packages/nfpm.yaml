@@ -1,0 +1,41 @@
+name: syspilot
+arch: @ARCH@
+platform: linux
+version: @VERSION@
+section: utils
+priority: optional
+maintainer: SysPilot Contributors <security@syspilot.dev>
+description: Evidence-first Linux diagnostics and process telemetry agent
+vendor: SysPilot
+homepage: https://github.com/slumio/SystemPilot
+license: MIT
+contents:
+  - src: @BINARY@
+    dst: /usr/bin/syspilot
+    file_info:
+      mode: 0755
+  - src: deploy/syspilot.service
+    dst: /usr/lib/systemd/system/syspilot.service
+    file_info:
+      mode: 0644
+  - dst: /etc/syspilot
+    type: dir
+    file_info:
+      mode: 0750
+  - dst: /var/lib/syspilot
+    type: dir
+    file_info:
+      mode: 0750
+scripts:
+  postinstall: deploy/packages/scripts/postinstall.sh
+  preremove: deploy/packages/scripts/preremove.sh
+  postremove: deploy/packages/scripts/postremove.sh
+overrides:
+  deb:
+    depends:
+      - libc6
+      - systemd
+  rpm:
+    depends:
+      - glibc
+      - systemd

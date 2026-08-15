@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: syspilot
+      POSTGRES_PASSWORD: local-admin-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d syspilot"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - cloud-postgres:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    image: postgres:16-bookworm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLEET_DATABASE_URL: postgresql://postgres:local-admin-only@postgres:5432/syspilot?sslmode=disable
+      FLEET_DB_ALLOW_INSECURE: "1"
+      PGPASSWORD: local-admin-only
+      SYSPILOT_DEV_PEPPER: 01234567890123456789012345678901
+      SYSPILOT_DEV_TOKEN: spn_local.0123456789012345678901234567890123456789
+    volumes:
+      - ./deploy/fleet:/deploy/fleet:ro
+    entrypoint: ["/deploy/fleet/dev-bootstrap.sh"]
+    security_opt:
+      - no-new-privileges:true
+
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.cloud
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://syspilot_runtime:local-runtime-only@postgres:5432/syspilot?sslmode=disable
+      SYSPILOT_CREDENTIAL_PEPPER: 01234567890123456789012345678901
+      LISTEN_ADDR: 0.0.0.0:8080
+      DATABASE_CONNECTIONS: 16
+      CONCURRENT_REQUESTS: 256
+      RUST_LOG: syspilot_cloud=info
+    ports:
+      - 127.0.0.1:8080:8080
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 2.0
+
+volumes:
+  cloud-postgres:

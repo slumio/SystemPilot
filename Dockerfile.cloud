@@ -1,0 +1,16 @@
+FROM rust:1.88-bookworm AS builder
+WORKDIR /source
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY crates ./crates
+COPY tools ./tools
+COPY deploy ./deploy
+RUN cargo build --locked --release -p syspilot-cloud
+
+FROM debian:bookworm-slim
+RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin syspilot-cloud
+COPY --from=builder /source/target/release/syspilot-cloud /usr/local/bin/syspilot-cloud
+COPY --from=builder /source/target/release/syspilot-reasoning-worker /usr/local/bin/syspilot-reasoning-worker
+USER 10001:10001
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/syspilot-cloud"]

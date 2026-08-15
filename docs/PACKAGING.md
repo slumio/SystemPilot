@@ -51,7 +51,24 @@ Release automation publishes SPDX SBOMs, a checksum manifest, GitHub build prove
 
 ## Debian and RPM
 
-The service and layout are ready for a `.deb`/RPM package. Before publishing one,
-add distribution-specific maintainer scripts that create the `syspilot` system
-user/group and preserve `/etc` configuration during upgrades. Do not package API
-keys in a binary or a world-readable configuration file.
+Release automation builds `.deb` and RPM packages for x86_64 and ARM64 with the
+same binary used in the signed release archive. Both formats create a locked
+`syspilot` service account, install the hardened systemd unit, and preserve
+configuration, credentials, evidence, and state across upgrades and removal.
+
+To build packages locally, install the pinned nfpm version used by CI and run:
+
+```bash
+cargo build --release --locked
+export SYSPILOT_PACKAGE_ARCH=amd64
+export SYSPILOT_PACKAGE_BINARY=target/release/syspilot
+export SYSPILOT_PACKAGE_VERSION=0.1.0
+mkdir -p dist
+deploy/packages/build.sh deb dist/syspilot.deb
+SYSPILOT_PACKAGE_ARCH=x86_64 deploy/packages/build.sh rpm dist/syspilot.rpm
+```
+
+Packages never contain API keys. Place optional credentials through systemd's
+credential store and use `syspilot doctor` to report availability without values.
+Removing a package intentionally retains `/etc/syspilot`, `/var/lib/syspilot`,
+and the service identity. An administrator must explicitly remove retained data.

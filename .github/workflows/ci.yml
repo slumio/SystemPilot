@@ -131,6 +131,51 @@ jobs:
       - name: Restricted-procfs compatible build and tests
         run: . "$HOME/.cargo/env" && cargo test --locked --workspace
 
+  packages:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release --locked
+      - uses: goreleaser/nfpm-action@v2
+        with:
+          version: v2.41.3
+      - name: Build Debian and RPM packages
+        env:
+          SYSPILOT_PACKAGE_ARCH: amd64
+          SYSPILOT_PACKAGE_BINARY: target/release/syspilot
+          SYSPILOT_PACKAGE_VERSION: 0.1.0
+        run: |
+          mkdir -p dist
+          deploy/packages/build.sh deb dist/syspilot.deb
+          SYSPILOT_PACKAGE_ARCH=x86_64 deploy/packages/build.sh rpm dist/syspilot.rpm
+      - name: Smoke-test Debian install and upgrade
+        run: docker run --rm -v "$PWD:/workspace:ro" debian:12 /workspace/deploy/packages/smoke-test.sh /workspace/dist/syspilot.deb
+      - name: Smoke-test RPM install and upgrade
+        run: docker run --rm -v "$PWD:/workspace:ro" fedora:42 /workspace/deploy/packages/smoke-test.sh /workspace/dist/syspilot.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: syspilot-linux-packages-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+  cloud-deployment:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.2
+      - name: Validate cloud development Compose model
+        run: docker compose -f compose.cloud-dev.yml config --quiet
+      - name: Build hardened cloud image
+        run: docker build --file Dockerfile.cloud --tag syspilot-cloud:ci .
+      - name: Lint and render hardened AWS chart
+        run: |
+          helm lint deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze
+          helm template syspilot deploy/cloud/helm/syspilot --set reasoning.endpoint=https://reasoning.example.test/v1/analyze > /tmp/syspilot-cloud-manifests.yaml
+
   fleet-schema:
     runs-on: ubuntu-latest
     services:
@@ -149,7 +194,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client jq
+      - uses: dtolnay/rust-toolchain@stable
       - name: Apply and reapply fleet schema
         env:
           FLEET_DB_ALLOW_INSECURE: "1"
@@ -190,3 +236,49 @@ jobs:
             echo "runtime role unexpectedly read global tenants" >&2
             exit 1
           fi
+      - name: Exercise authenticated transactional ingestion
+        env:
+          PGPASSWORD: migration-test
+          TEST_TOKEN: spn_test.0123456789012345678901234567890123456789
+          TEST_PEPPER: 01234567890123456789012345678901
+        run: |
+          token_hash=$(printf '%s' "$TEST_TOKEN" | openssl dgst -sha256 -hmac "$TEST_PEPPER" -binary | xxd -p -c 256)
+          psql -h localhost -U postgres -d syspilot --set ON_ERROR_STOP=1 <<SQL
+          INSERT INTO syspilot_control.enrollment_credentials
+            (tenant_id,node_id,token_prefix,token_hash,expires_at)
+          VALUES
+            ('00000000-0000-0000-0000-000000000001','node-one','spn_test',decode('$token_hash','hex'),clock_timestamp() + interval '1 day');
+          INSERT INTO syspilot_control.alert_destinations(tenant_id,channel,destination_ref)
+          VALUES ('00000000-0000-0000-0000-000000000001','email','ops@example.test');
+          CREATE ROLE syspilot_reasoner LOGIN PASSWORD 'reasoner-test';
+          GRANT syspilot_cloud_worker TO syspilot_reasoner;
+          SQL
+          cargo build --locked -p syspilot-cloud
+          DATABASE_URL='postgresql://syspilot_runtime:runtime-test@localhost:5432/syspilot?sslmode=disable' \
+          SYSPILOT_CREDENTIAL_PEPPER="$TEST_PEPPER" LISTEN_ADDR=127.0.0.1:18080 \
+            target/debug/syspilot-cloud >cloud-collector.log 2>&1 &
+          collector_pid=$!
+          trap 'kill "$collector_pid" 2>/dev/null || true; cat cloud-collector.log' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18080/health/ready && break
+            sleep 1
+          done
+          payload='[{"schema_version":1,"message_id":"message-one","node_id":"node-one","sequence":1,"observed_at_unix_nanos":1,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
+          first=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$payload" http://127.0.0.1:18080/v1/telemetry)
+          test "$(printf '%s' "$first" | jq -r '.accepted_message_ids[0]')" = message-one
+          replay=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$payload" http://127.0.0.1:18080/v1/telemetry)
+          test "$(printf '%s' "$replay" | jq -r '.accepted_message_ids[0]')" = message-one
+          conflict_payload='[{"schema_version":1,"message_id":"message-conflict","node_id":"node-one","sequence":1,"observed_at_unix_nanos":2,"kind":"health","payload":{"healthy":true},"attributes":{}}]'
+          conflict=$(curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$conflict_payload" http://127.0.0.1:18080/v1/telemetry)
+          test "$(printf '%s' "$conflict" | jq -r '.rejected_records[0].reason')" = sequence_conflict
+          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.telemetry_messages')" = 1
+          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.reasoning_jobs')" = 1
+          test "$(psql -h localhost -U postgres -d syspilot -tAc 'SELECT count(*) FROM syspilot_control.active_server_days')" = 1
+          alert_payload='[{"schema_version":1,"message_id":"alert-one","node_id":"node-one","sequence":2,"observed_at_unix_nanos":2,"kind":"process_alert","payload":{"instance_id":"alert-instance","state":"firing","previous_state":null,"rule_id":"postgres-exit","process_name":"postgres","pid":12,"ppid":1,"event_type":"EXIT","observed_at_unix_nanos":2,"labels":{"severity":"high"}},"attributes":{}}]'
+          curl --fail --silent -H "Authorization: Bearer $TEST_TOKEN" -H 'Content-Type: application/json' --data "$alert_payload" http://127.0.0.1:18080/v1/telemetry >/dev/null
+          test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.notification_deliveries WHERE alert_instance_id='alert-instance'")" = 1
+          leased=$(PGPASSWORD=reasoner-test psql -h localhost -U syspilot_reasoner -d syspilot -tAc "SELECT job_id FROM syspilot_control.lease_reasoning_job() LIMIT 1")
+          test -n "$leased"
+          PGPASSWORD=reasoner-test psql -h localhost -U syspilot_reasoner -d syspilot --set ON_ERROR_STOP=1 \
+            --command "SELECT syspilot_control.complete_reasoning_job('00000000-0000-0000-0000-000000000001',$leased,'{\"summary\":\"ci reasoning\"}'::jsonb)" >/dev/null
+          test "$(psql -h localhost -U postgres -d syspilot -tAc "SELECT count(*) FROM syspilot_control.reasoning_results WHERE result->>'summary'='ci reasoning'")" = 1

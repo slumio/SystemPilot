@@ -11,8 +11,10 @@ flowchart TD
     Start --> Dev[Build or test SysPilot]
     Host --> Native[Native release binary + systemd]
     Fleet --> Agent[Native agent on every host]
-    Agent --> API[Your HTTPS collector API]
+    Agent --> API[AWS HTTPS collector]
     API --> DB[(PostgreSQL control plane)]
+    DB --> Reasoning[Cloud reasoning workers]
+    Reasoning --> Alerts[Alert delivery]
     Dev --> Container[Docker or CI container]
 ```
 
@@ -52,7 +54,8 @@ AI, fleet connectivity, and PostgreSQL are never required for local diagnostics.
 | `src/profiler.rs` | Optional process profiling data. |
 | `src/ui/` | Terminal monitor and Markdown stream renderer. |
 | `crates/syspilot-abi` | Shared telemetry ABI types. |
-| `crates/syspilot-collector` | Bounded collector primitives and fleet database schema invariants. |
+| `crates/syspilot-collector` | Bounded local kernel-event ingress and fleet schema invariants; it is not an HTTP service. |
+| `crates/syspilot-cloud` | Authenticated, bounded HTTP ingestion with transactional PostgreSQL acknowledgement. |
 | `deploy/fleet/` | PostgreSQL fleet-control migration and fail-closed setup tooling. |
 
 ## Distributed telemetry boundary
@@ -75,7 +78,7 @@ sequenceDiagram
     A->>S: atomic durable append
     A-->>C: batch with node ID, message ID, sequence
     C->>P: authenticated tenant transaction
-    P-->>C: commit deduplication and sequence state
+    P-->>C: commit deduplication, usage, and reasoning job
     C-->>A: accepted IDs, rejections, retry timing
     A->>S: remove only committed acknowledgements
     Note over A,S: Failure retains data for bounded replay
@@ -83,9 +86,9 @@ sequenceDiagram
 
 ### Current scale boundary
 
-There is no defensible fixed “number of servers” rating yet. Every host runs one independent exporter worker with a default batch of 256 records per second, a 4,096-entry wake-up queue, and an owner-only spool bounded to 512 MiB or seven days. Those are per-agent resilience limits, not collector capacity figures.
+Every host runs one independent exporter worker with a default batch limit of 256 records, a 4,096-entry wake-up queue, and an owner-only spool bounded to 512 MiB or seven days. Those are per-agent resilience limits, not collector capacity figures.
 
-The repository currently provides the agent protocol, acknowledgement validation, retry/replay behavior, and tenant-isolated PostgreSQL schema. It does **not** yet provide a production HTTP ingestion service, horizontal autoscaling implementation, or fleet load-test result. Until those exist, SysPilot supports local agents and development collector integrations, but no production fleet-size claim should be made. Collector capacity will depend on request rate per node, database transaction latency, connection-pool sizing, retention, and replication.
+The repository provides the agent protocol, acknowledgement validation, retry/replay behavior, tenant-isolated PostgreSQL schema, and the first authenticated transactional HTTP collector. It does **not** yet have a production AWS deployment or a PostgreSQL-backed 1,000-server certification. No production fleet-size claim should be made until that gate passes. Capacity depends on event rate per node, database transaction latency, connection-pool sizing, reasoning workers, retention, and replication.
 
 Use the [Docker fleet transport benchmark](docs/FLEET_BENCHMARK.md) to measure a synthetic stateless acknowledgement path without confusing that result with production capacity.
 
@@ -100,7 +103,8 @@ flowchart TB
     end
     Agent -->|TLS + bearer credential| Collector[Collector authentication boundary]
     Collector -->|verified tenant transaction| RLS[(PostgreSQL forced RLS)]
-    Agent -. optional redacted context .-> AI[External AI boundary]
+    RLS --> Jobs[Cloud reasoning jobs]
+    Jobs --> Alerts[Cloud alert evaluation and delivery]
 ```
 
 - Configuration, JSON output, logs, doctor reports, and support bundles expose credential source and availability, never credential values.
@@ -109,6 +113,7 @@ flowchart TB
 - Delivery is replay-safe and acknowledgement-driven, but it is not exactly-once transport; collectors must deduplicate by tenant, node, and message ID.
 - Forced database row-level security is defense in depth. The collector must authenticate the node and set the tenant inside every transaction.
 - No telemetry is exported until an operator enables it and can inspect a preview.
+- Collection and durable buffering remain local. AWS reasoning and alerting operate only on committed, redacted envelopes; cloud failure never disables local diagnostics.
 
 ## First-run path
 

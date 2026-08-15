@@ -23,6 +23,16 @@ select bounded work.
 - Causal HTML reports are self-contained, script-safe, and require no CDN.
   Configuration, report, index, spool, evidence, and support writes report failures.
 
+## Commercial cloud foundation in progress
+
+- The AWS-facing Rust collector now enforces bounded authenticated ingestion,
+  tenant-scoped transactions, replay deduplication, active-server metering,
+  durable reasoning jobs, and alert-delivery jobs.
+- The horizontally leasable reasoning worker sends committed redacted envelopes
+  to an HTTPS AWS reasoning endpoint and records bounded retry outcomes.
+- Docker development topology and real-PostgreSQL CI gates cover ingestion,
+  replay, sequence conflicts, tenant isolation, reasoning, and cloud alerts.
+
 ## Remaining hosted-control-plane work
 
 - Harden the systemd package path: Debian/RPM maintainer scripts, a dedicated
@@ -30,8 +40,10 @@ select bounded work.
 - Add deterministic tests for local Ollama/Qwen embedding retrieval and index
   invalidation when the embedding model changes.
 - Improve provider errors with retry hints, quota details, and safe diagnostics.
-- Expand the future self-hosted HTTP collector independently from the Linux
-  kernel-ingress crate. The latter is a local event transport, not an HTTP server.
+- Complete AWS deployment automation, notification delivery workers, customer
+  identity/RBAC APIs, the fleet web console, billing reconciliation, retention,
+  and the PostgreSQL-backed 1,000-server certification. The Linux kernel-ingress
+  crate remains local event transport and is not the HTTP server.
 
 ## Diagnostics and observability
 

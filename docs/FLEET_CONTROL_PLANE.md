@@ -2,7 +2,7 @@
 
 The fleet database belongs to the collector/control plane. SysPilot agents never connect to PostgreSQL and local `doctor`, evidence, TUI, alert, and case workflows remain operational without it.
 
-> **Current capacity statement:** this repository does not yet ship the production HTTP ingestion service or a fleet load-test result. The schema and agent protocol are ready for collector development, but there is currently no validated maximum server count. See the [architecture scale boundary](../ARCHITECTURE.md#current-scale-boundary).
+> **Current capacity statement:** the repository now includes the first authenticated transactional HTTP collector, but it has not passed the PostgreSQL-backed production 1,000-server certification. Synthetic transport results remain development measurements, not a supported fleet maximum. See the [architecture scale boundary](../ARCHITECTURE.md#current-scale-boundary).
 
 ## Scope
 
@@ -57,6 +57,20 @@ Ingestion must perform these actions in one transaction:
 4. lock and update `node_sequence_state`, recording gaps rather than hiding them;
 5. update node `last_seen_at` and append an audit event when policy requires it;
 6. commit before returning accepted IDs, highest accepted sequence, rejections, and retry timing.
+
+The `syspilot-cloud` binary implements this boundary. It requires
+`DATABASE_URL` for a login that is a member of `syspilot_control_app` and a
+minimum 32-byte `SYSPILOT_CREDENTIAL_PEPPER`. Production injects both through
+AWS Secrets Manager or workload identity; neither belongs in an image or
+configuration file.
+
+Committed envelopes create durable reasoning jobs. Run
+`syspilot-reasoning-worker` under a login that is only a member of
+`syspilot_cloud_worker`. Configure an HTTPS
+`SYSPILOT_AWS_REASONING_ENDPOINT` and its secret-injected bearer credential.
+Workers lease with `FOR UPDATE SKIP LOCKED`, retry bounded failures, and store
+object results transactionally. The endpoint receives the redacted envelope,
+node ID, and message ID; it does not receive database credentials or tenant IDs.
 
 A database error or failed commit acknowledges nothing. Never construct acknowledgements before the commit succeeds.
 

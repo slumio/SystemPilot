@@ -2,7 +2,7 @@
 
 This benchmark answers a narrow question: how many simulated agents can concurrently send SysPilot-compatible batches to a stateless acknowledgement endpoint on the tested Docker host?
 
-It does **not** certify production fleet capacity. The synthetic collector deliberately excludes enrollment authentication, PostgreSQL transactions, row-level security, retention, object storage, and replay storms. Production capacity must be measured again when the real collector exists.
+It does **not** certify production fleet capacity. The synthetic collector deliberately excludes enrollment authentication, PostgreSQL transactions, row-level security, reasoning, retention, object storage, and replay storms. The real collector now exists, but production capacity must be measured separately with its PostgreSQL and AWS dependencies enabled.
 
 ## Run
 

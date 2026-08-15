@@ -8,6 +8,7 @@ build/
 .kiro/
 # Rust Legacy Build Artifacts
 /target/
+/dist/
 **/*.rs.bk
 
 # Local Configuration and Logs

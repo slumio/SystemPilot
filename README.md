@@ -315,6 +315,24 @@ The exporter redacts each envelope before atomically appending it to an owner-on
 
 Fleet inventory, ingestion deduplication, sequence gaps, shared cases, alert state, RBAC, retention, deletion requests, and immutable audit events use the optional PostgreSQL control-plane schema. Agents never connect to the database and local operation remains independent. See [Fleet control-plane database](docs/FLEET_CONTROL_PLANE.md) for fail-closed setup and mandatory tenant transaction rules.
 
+### Local collection with AWS reasoning
+
+Process collection, redaction, and the durable retry spool always run on the
+Linux host. When an operator enables export after reviewing the telemetry
+preview, the AWS-facing collector authenticates the node and commits accepted
+envelopes plus a reasoning job in one tenant-scoped transaction. Fleet
+reasoning and alert delivery run in AWS; their failure is visible and does not
+disable local status, doctor, evidence, cases, alerts, or the TUI.
+
+For an isolated development deployment of the real collector and PostgreSQL:
+
+```bash
+docker compose -f compose.cloud-dev.yml up --build
+```
+
+The development credential printed in `compose.cloud-dev.yml` is intentionally
+fixed and must never be used outside the loopback-only development stack.
+
 ### Envelope contract
 
 Each envelope contains `schema_version`, `message_id`, `node_id`, monotonically increasing `sequence`, `observed_at_unix_nanos`, `kind`, `payload`, and optional `attributes`.
