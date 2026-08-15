@@ -138,18 +138,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: actions/setup-go@v6
         with:
           go-version: '1.24.x'
           cache: false
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          cargo build --release --locked --target x86_64-unknown-linux-musl
       - name: Install pinned nfpm
         run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
       - name: Build Debian and RPM packages
         env:
           SYSPILOT_PACKAGE_ARCH: amd64
-          SYSPILOT_PACKAGE_BINARY: target/release/syspilot
+          SYSPILOT_PACKAGE_BINARY: target/x86_64-unknown-linux-musl/release/syspilot
           SYSPILOT_PACKAGE_VERSION: 0.1.0
         run: |
           mkdir -p dist

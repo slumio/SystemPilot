@@ -51,17 +51,20 @@ Release automation publishes SPDX SBOMs, a checksum manifest, GitHub build prove
 
 ## Debian and RPM
 
-Release automation builds `.deb` and RPM packages for x86_64 and ARM64 with the
-same binary used in the signed release archive. Both formats create a locked
+Release automation builds static-musl `.deb` and RPM packages for x86_64 and
+ARM64 with the same binary used in the signed release archive. Static linking
+avoids coupling an artifact to the build runner's newer glibc. Both formats create a locked
 `syspilot` service account, install the hardened systemd unit, and preserve
 configuration, credentials, evidence, and state across upgrades and removal.
 
 To build packages locally, install the pinned nfpm version used by CI and run:
 
 ```bash
-cargo build --release --locked
+rustup target add x86_64-unknown-linux-musl
+# Debian/Ubuntu: sudo apt-get install musl-tools
+cargo build --release --locked --target x86_64-unknown-linux-musl
 export SYSPILOT_PACKAGE_ARCH=amd64
-export SYSPILOT_PACKAGE_BINARY=target/release/syspilot
+export SYSPILOT_PACKAGE_BINARY=target/x86_64-unknown-linux-musl/release/syspilot
 export SYSPILOT_PACKAGE_VERSION=0.1.0
 mkdir -p dist
 deploy/packages/build.sh deb dist/syspilot.deb

@@ -15,15 +15,19 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
+            package_arch: amd64
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
+            package_arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install static Linux toolchain
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Archive binary and checksum
         run: |
@@ -41,7 +45,7 @@ jobs:
         run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
       - name: Build distribution packages
         env:
-          SYSPILOT_PACKAGE_ARCH: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'amd64' || 'arm64' }}
+          SYSPILOT_PACKAGE_ARCH: ${{ matrix.package_arch }}
           SYSPILOT_PACKAGE_BINARY: target/${{ matrix.target }}/release/syspilot
           SYSPILOT_PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
