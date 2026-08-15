@@ -1,0 +1,48 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.fleet-loadtest
+    command: ["server"]
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/syspilot-fleet-loadtest", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 2.0
+
+  load:
+    build:
+      context: .
+      dockerfile: Dockerfile.fleet-loadtest
+    command: ["load"]
+    depends_on:
+      collector:
+        condition: service_healthy
+    environment:
+      TARGET_URL: http://collector:8080/v1/telemetry
+      VIRTUAL_SERVERS: ${VIRTUAL_SERVERS:-1000}
+      DURATION_SECONDS: ${DURATION_SECONDS:-30}
+      BATCH_SIZE: ${BATCH_SIZE:-16}
+      REQUESTS_PER_SERVER_SECOND: ${REQUESTS_PER_SERVER_SECOND:-1}
+      MAX_FAILURE_RATE: ${MAX_FAILURE_RATE:-0.001}
+      MAX_P95_MS: ${MAX_P95_MS:-500}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    cpus: 4.0

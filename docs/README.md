@@ -16,6 +16,7 @@ This directory contains the current operational documentation for the Rust appli
 | [Daemon reliability](RELIABILITY.md) | systemd service installation and health checks. | Canonical operations guide. |
 | [Telemetry protocol](TELEMETRY_PROTOCOL.md) | Public schema-v1 collector and compatibility contract. | Canonical protocol specification. |
 | [Fleet database](FLEET_CONTROL_PLANE.md) | PostgreSQL schema, tenant isolation, setup, ingestion transactions, and operations. | Canonical fleet-control storage guide. |
+| [Fleet benchmark](FLEET_BENCHMARK.md) | Docker-based synthetic multi-agent transport load test and interpretation limits. | Development capacity tool; not a production fleet certification. |
 | [Configuration migrations](CONFIG_MIGRATIONS.md) | Versioned upgrades, immutable backups, fail-closed validation, and rollback. | Canonical configuration recovery guide. |
 
 ## Documentation order

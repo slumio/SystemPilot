@@ -9,6 +9,38 @@ permissions:
   contents: read
 
 jobs:
+  fleet-transport-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VIRTUAL_SERVERS: "1000"
+      DURATION_SECONDS: "30"
+      BATCH_SIZE: "16"
+      REQUESTS_PER_SERVER_SECOND: "1"
+      MAX_FAILURE_RATE: "0.001"
+      MAX_P95_MS: "500"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate benchmark Compose model
+        run: docker compose -f compose.fleet-benchmark.yml config --quiet
+      - name: Build pinned benchmark containers
+        run: docker compose -f compose.fleet-benchmark.yml build
+      - name: Run 1,000-server transport gate
+        run: docker compose -f compose.fleet-benchmark.yml up --abort-on-container-exit --exit-code-from load
+      - name: Preserve benchmark report
+        if: always()
+        run: docker compose -f compose.fleet-benchmark.yml logs --no-color --no-log-prefix load > fleet-benchmark.json
+      - name: Remove benchmark containers
+        if: always()
+        run: docker compose -f compose.fleet-benchmark.yml down --volumes --remove-orphans
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-transport-benchmark-${{ github.sha }}
+          path: fleet-benchmark.json
+          if-no-files-found: error
+
   test:
     strategy:
       fail-fast: false

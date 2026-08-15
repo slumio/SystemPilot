@@ -87,6 +87,8 @@ There is no defensible fixed “number of servers” rating yet. Every host runs
 
 The repository currently provides the agent protocol, acknowledgement validation, retry/replay behavior, and tenant-isolated PostgreSQL schema. It does **not** yet provide a production HTTP ingestion service, horizontal autoscaling implementation, or fleet load-test result. Until those exist, SysPilot supports local agents and development collector integrations, but no production fleet-size claim should be made. Collector capacity will depend on request rate per node, database transaction latency, connection-pool sizing, retention, and replication.
 
+Use the [Docker fleet transport benchmark](docs/FLEET_BENCHMARK.md) to measure a synthetic stateless acknowledgement path without confusing that result with production capacity.
+
 ## Security boundaries
 
 ```mermaid

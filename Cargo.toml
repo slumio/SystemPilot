@@ -27,7 +27,7 @@ include = [
 ]
 
 [workspace]
-members = [".", "crates/syspilot-abi", "crates/syspilot-collector"]
+members = [".", "crates/syspilot-abi", "crates/syspilot-collector", "tools/fleet-loadtest"]
 resolver = "2"
 
 [[bin]]
