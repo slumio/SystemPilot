@@ -27,6 +27,10 @@ IMPORTANT TERMINAL FORMATTING RULES:\n\
 /// Stream AI response to terminal via MdStreamer.
 pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer) -> bool {
     let (url, headers, payload) = match config.active_provider.as_str() {
+        "disabled" => {
+            eprintln!("❌ AI explanations are disabled. Offline diagnostics remain available; run `syspilot provider <gemini|ollama|syspilot>` to enable them.");
+            return false;
+        }
         "gemini" => {
             if config.gemini_api_key.is_empty() {
                 eprintln!(
@@ -132,7 +136,9 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
     if !status.is_success() {
         let mut body = String::new();
         let mut response = response;
-        let _ = response.read_to_string(&mut body);
+        if let Err(error) = response.read_to_string(&mut body) {
+            eprintln!("❌ Could not read AI provider error response: {error}");
+        }
         let message = provider_error_message(&body).unwrap_or_else(|| body.trim().to_string());
         eprintln!(
             "❌ AI provider returned HTTP {}: {}",
@@ -160,10 +166,16 @@ pub fn query_ai_stream(config: &Config, prompt: &str, streamer: &mut MdStreamer)
         };
         for text in streamed_text(&config.active_provider, &line) {
             received_content = true;
-            streamer.print(&text);
+            if let Err(error) = streamer.try_print(&text) {
+                eprintln!("❌ Terminal output failed while streaming AI response: {error}");
+                return false;
+            }
         }
     }
-    streamer.flush();
+    if let Err(error) = streamer.try_flush() {
+        eprintln!("❌ Terminal output flush failed: {error}");
+        return false;
+    }
     println!();
     if !received_content {
         eprintln!("❌ AI provider returned no usable streamed content.");
@@ -268,7 +280,9 @@ pub fn pull_ollama_model(config: &Config, model_name: &str) -> bool {
                     } else {
                         print!("\r{:<50}", status);
                     }
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    if let Err(error) = std::io::Write::flush(&mut std::io::stdout()) {
+                        eprintln!("terminal output flush failed: {error}");
+                    }
                 }
             }
         }

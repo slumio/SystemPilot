@@ -7,6 +7,7 @@ use syspilot::{
 };
 
 use causal_engine::CausalGraph;
+use clap::Parser;
 
 use std::fs;
 use std::io::BufRead;
@@ -232,8 +233,9 @@ fn create_support_bundle_or_exit(args: &[String], json_requested: bool) {
 }
 
 fn main() {
+    let typed_cli = syspilot::cli::Cli::parse();
     let mut args: Vec<String> = std::env::args().collect();
-    let json_requested = args.iter().any(|argument| argument == "--json");
+    let json_requested = typed_cli.json;
     args.retain(|argument| argument != "--json");
     if args.len() < 2 {
         print_help();
@@ -461,13 +463,35 @@ fn main() {
                         .get(4)
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.json", args[3])));
-                    store
-                        .export(&args[3], &destination)
-                        .map(|_| println!("✅ Exported {}", destination.display()))
+                    store.export(&args[3], &destination).map(|_| {
+                        if json_requested {
+                            println!(
+                                "{}",
+                                envelope_json_or_exit(
+                                    "cases.export",
+                                    output::Outcome::Ok,
+                                    serde_json::json!({"case_id": args[3], "destination": destination})
+                                )
+                            );
+                        } else {
+                            println!("✅ Exported {}", destination.display());
+                        }
+                    })
                 }
-                "delete" if args.len() == 4 => store
-                    .delete(&args[3])
-                    .map(|_| println!("✅ Deleted case {}", args[3])),
+                "delete" if args.len() == 4 => store.delete(&args[3]).map(|_| {
+                    if json_requested {
+                        println!(
+                            "{}",
+                            envelope_json_or_exit(
+                                "cases.delete",
+                                output::Outcome::Ok,
+                                serde_json::json!({"case_id": args[3], "deleted": true})
+                            )
+                        );
+                    } else {
+                        println!("✅ Deleted case {}", args[3]);
+                    }
+                }),
                 _ => {
                     eprintln!("❌ Usage: syspilot cases <list|show|export|delete> [id] [path]");
                     std::process::exit(1);
@@ -637,13 +661,13 @@ fn main() {
         }
         "provider" => {
             if args.len() < 3 {
-                eprintln!("❌ Expected provider name (gemini, ollama, syspilot)");
+                eprintln!("❌ Expected provider name (disabled, gemini, ollama, syspilot)");
                 std::process::exit(1);
             }
             let prov = args[2].to_lowercase();
-            if !["gemini", "ollama", "syspilot"].contains(&prov.as_str()) {
+            if !["disabled", "gemini", "ollama", "syspilot"].contains(&prov.as_str()) {
                 eprintln!(
-                    "❌ Unknown provider: {}. Use: gemini, ollama, syspilot.",
+                    "❌ Unknown provider: {}. Use: disabled, gemini, ollama, syspilot.",
                     prov
                 );
                 std::process::exit(1);
@@ -681,9 +705,22 @@ fn main() {
                 );
                 print!("Switch to Ollama? [Y/n] ");
                 use std::io::Write;
-                let _ = std::io::stdout().flush();
+                if let Err(error) = std::io::stdout().flush() {
+                    eprintln!("❌ Could not display confirmation prompt: {error}");
+                    std::process::exit(1);
+                }
                 let mut input = String::new();
-                let _ = std::io::stdin().read_line(&mut input);
+                match std::io::stdin().read_line(&mut input) {
+                    Ok(0) => {
+                        eprintln!("❌ Input closed before confirmation; pull aborted.");
+                        std::process::exit(1);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("❌ Could not read confirmation: {error}");
+                        std::process::exit(1);
+                    }
+                }
                 let trimmed = input.trim().to_lowercase();
                 if trimmed != "y" && !trimmed.is_empty() {
                     println!("Pull aborted.");
@@ -724,6 +761,24 @@ fn main() {
                             conf.distributed_telemetry.node_id = args[5].clone();
                             conf.distributed_telemetry.bearer_token =
                                 args.get(6).cloned().unwrap_or_default();
+                            conf.distributed_telemetry.bearer_credential =
+                                if conf.distributed_telemetry.bearer_token.is_empty() {
+                                    syspilot::credentials::CredentialRef::None
+                                } else {
+                                    match syspilot::credentials::store_owner_secret(
+                                        &config::get_syspilot_dir().join("credentials"),
+                                        "telemetry-token",
+                                        &conf.distributed_telemetry.bearer_token,
+                                    ) {
+                                        Ok(reference) => reference,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "❌ Could not store telemetry credential: {error}"
+                                            );
+                                            std::process::exit(1);
+                                        }
+                                    }
+                                };
                             save_config_or_exit(&conf);
                             println!(
                                 "✅ Distributed telemetry enabled for node {}",
@@ -732,6 +787,9 @@ fn main() {
                         }
                         "disable" => {
                             conf.distributed_telemetry.enabled = false;
+                            conf.distributed_telemetry.bearer_token.clear();
+                            conf.distributed_telemetry.bearer_credential =
+                                syspilot::credentials::CredentialRef::None;
                             save_config_or_exit(&conf);
                             println!("✅ Distributed telemetry disabled");
                         }
@@ -878,13 +936,9 @@ fn main() {
                     }
                     let prov = args[3].to_lowercase();
                     let key = &args[4];
-                    match prov.as_str() {
-                        "gemini" => conf.gemini_api_key = key.clone(),
-                        "syspilot" => conf.syspilot_api_key = key.clone(),
-                        _ => {
-                            eprintln!("❌ Provider {} does not use API keys.", prov);
-                            std::process::exit(1);
-                        }
+                    if let Err(error) = config::set_provider_credential(&mut conf, &prov, key) {
+                        eprintln!("❌ Could not store provider credential: {error}");
+                        std::process::exit(1);
                     }
                     save_config_or_exit(&conf);
                     println!("✅ API key set for {}", prov);
@@ -1103,18 +1157,37 @@ fn main() {
                     // Save reports
                     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                     let reports_dir = format!("{}/syspilot_reports", home);
-                    let _ = fs::create_dir_all(&reports_dir);
+                    if let Err(error) = fs::create_dir_all(&reports_dir) {
+                        eprintln!("❌ Could not create report directory {reports_dir}: {error}");
+                    }
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let dot_path = format!("{}/causal_graph_{}.dot", reports_dir, ts);
                     let html_path = format!("{}/causal_graph_{}.html", reports_dir, ts);
-                    let _ = fs::write(&dot_path, graph.export_graph_to_dot(&path));
-                    let _ = fs::write(&html_path, graph.export_graph_to_html(&path));
-                    println!("💾 Saved causal graph to:");
-                    println!("   - DOT:  {}", dot_path);
-                    println!("   - HTML: {}\n", html_path);
+                    let dot = graph.export_graph_to_dot(&path);
+                    let html = graph.export_graph_to_html(&path);
+                    let dot_result = syspilot::config_migration::atomic_write(
+                        std::path::Path::new(&dot_path),
+                        dot.as_bytes(),
+                    );
+                    let html_result = syspilot::config_migration::atomic_write(
+                        std::path::Path::new(&html_path),
+                        html.as_bytes(),
+                    );
+                    match dot_result {
+                        Ok(()) => println!("💾 Saved DOT causal graph: {dot_path}"),
+                        Err(error) => {
+                            eprintln!("❌ Could not write requested DOT report {dot_path}: {error}")
+                        }
+                    }
+                    match html_result {
+                        Ok(()) => println!("💾 Saved HTML causal graph: {html_path}"),
+                        Err(error) => eprintln!(
+                            "❌ Could not write requested HTML report {html_path}: {error}"
+                        ),
+                    }
 
                     if !no_index {
                         println!("🔍 Mapping causal nodes back to codebase...");

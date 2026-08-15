@@ -50,7 +50,9 @@ fn replace_binary(source: &std::path::Path, destination: &std::path::Path) -> io
         fs::rename(&temporary, destination)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        if let Err(cleanup) = fs::remove_file(&temporary) {
+            eprintln!("installation temporary-file cleanup failed: {cleanup}");
+        }
     }
     result
 }
@@ -85,9 +87,10 @@ pub fn install_user_binary(force: bool) -> bool {
         return false;
     }
     println!("✅ Installed binary at {}", destination.display());
-    let bin_dir = destination
-        .parent()
-        .expect("binary destination has a parent");
+    let Some(bin_dir) = destination.parent() else {
+        eprintln!("❌ Binary destination has no parent directory");
+        return false;
+    };
     if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .any(|entry| entry == bin_dir)
     {

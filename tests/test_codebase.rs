@@ -1,7 +1,7 @@
 /// Tests for src/codebase.rs
 /// Covers: cosine similarity, vector normalization, file chunking, VectorDb
 /// binary round-trip.
-use syspilot::codebase::{self, DbChunk, FileRegistry, VectorDb};
+use syspilot::codebase::{self, DbChunk, FileRegistry, VectorDb, VectorIndexLoad};
 
 // ── cosine_similarity ─────────────────────────────────────────────────────────
 
@@ -248,7 +248,9 @@ fn vector_db_save_and_load_roundtrip() {
     let db = sample_db();
     db.save_to_binary(&path).expect("save_to_binary failed");
 
-    let loaded = VectorDb::load_from_binary(&path).expect("load_from_binary failed");
+    let VectorIndexLoad::Loaded(loaded) = VectorDb::load_outcome(&path) else {
+        panic!("expected loaded vector index");
+    };
 
     assert_eq!(loaded.workspace_path, "/workspace/test");
     assert_eq!(loaded.files.len(), 1);
@@ -277,16 +279,22 @@ fn vector_db_save_and_load_roundtrip() {
 }
 
 #[test]
-fn vector_db_wrong_magic_returns_none() {
+fn vector_db_wrong_magic_is_corrupt() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_str().unwrap().to_string();
     std::fs::write(&path, b"WRONG_MAGIC_HEADER_12345").unwrap();
-    assert!(VectorDb::load_from_binary(&path).is_none());
+    assert!(matches!(
+        VectorDb::load_outcome(&path),
+        VectorIndexLoad::Corrupt { .. }
+    ));
 }
 
 #[test]
-fn vector_db_missing_file_returns_none() {
-    assert!(VectorDb::load_from_binary("/no/such/file/xyz_syspilot_test.bin").is_none());
+fn vector_db_missing_file_is_explicit() {
+    assert!(matches!(
+        VectorDb::load_outcome("/no/such/file/xyz_syspilot_test.bin"),
+        VectorIndexLoad::Missing
+    ));
 }
 
 #[test]
@@ -296,7 +304,9 @@ fn vector_db_empty_db_roundtrip() {
 
     let empty = VectorDb::default();
     empty.save_to_binary(&path).unwrap();
-    let loaded = VectorDb::load_from_binary(&path).unwrap();
+    let VectorIndexLoad::Loaded(loaded) = VectorDb::load_outcome(&path) else {
+        panic!("expected loaded vector index");
+    };
 
     assert_eq!(loaded.workspace_path, "");
     assert!(loaded.files.is_empty());
@@ -323,11 +333,30 @@ fn vector_db_multiple_chunks_roundtrip() {
     }
 
     db.save_to_binary(&path).unwrap();
-    let loaded = VectorDb::load_from_binary(&path).unwrap();
+    let VectorIndexLoad::Loaded(loaded) = VectorDb::load_outcome(&path) else {
+        panic!("expected loaded vector index");
+    };
 
     assert_eq!(loaded.chunks.len(), 10);
     for (i, chunk) in loaded.chunks.iter().enumerate() {
         assert_eq!(chunk.file_path, format!("file_{}.rs", i));
         assert_eq!(chunk.start_line, i as u32 * 10 + 1);
+    }
+}
+#[test]
+fn corrupt_vector_index_is_quarantined_and_visible() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("index.bin");
+    std::fs::write(&path, b"not-a-vector-index").unwrap();
+
+    match VectorDb::load_outcome(path.to_str().unwrap()) {
+        VectorIndexLoad::Corrupt {
+            quarantined_to: Some(quarantine),
+            ..
+        } => {
+            assert!(!path.exists());
+            assert!(quarantine.exists());
+        }
+        outcome => panic!("expected quarantined corruption, got {outcome:?}"),
     }
 }

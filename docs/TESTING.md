@@ -4,8 +4,8 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 cargo build --release --locked
 sh -n install.sh deploy/fleet/setup-db.sh
 git diff --check
@@ -17,7 +17,7 @@ Unit tests cover parsing, schemas, redaction, acknowledgement validation, retry 
 
 | Area | Success check | Failure/degraded check |
 |---|---|---|
-| Configuration | Save/load schema 1 | Malformed/newer schema rejected; rollback still runs |
+| Configuration | Save/load secret-free schema 2 and resolve credential sources | Malformed/newer schema, permissive credentials, and interrupted migration rejected; rollback still runs |
 | Evidence | Capture, persist, list, show/export | Missing PID and corrupt case visible |
 | Support | Credential-free `0600` artifact | Missing/malformed component produces exit `2` |
 | Daemon | Socket response and fresh health | Missing/stale health and Netlink degradation visible |

@@ -27,8 +27,10 @@ Dependencies point inward. Domain records do not print, exit the process, initia
 | Module | Responsibility | Must not own |
 |---|---|---|
 | `config`, `config_migration` | Schema validation, atomic migration/rollback | CLI rendering, network probing |
+| `credentials` | Credential references, owner-file storage, runtime resolution | Secret serialization or display |
 | `output` | Typed JSON encoding/decoding for presentation | Domain policy |
 | `telemetry` | procfs/system collection | Fleet delivery or AI |
+| `proc_snapshot` | Shared bounded-age process snapshots | Rendering, fleet delivery, AI |
 | `evidence` | Evidence schema, capture, case retention | Hosted persistence |
 | `alert` | Durable lifecycle transitions | AI triggering/remediation |
 | `distributed`, `spool` | Envelope/redaction, acknowledgement, replay | PostgreSQL |

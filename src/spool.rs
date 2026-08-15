@@ -67,7 +67,9 @@ impl DiskSpool {
             .open(&temporary)
             .map_err(|e| AppError::io("could not create temporary spool record", e))?;
         if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-            let _ = fs::remove_file(&temporary);
+            if let Err(cleanup) = fs::remove_file(&temporary) {
+                eprintln!("spool temporary-file cleanup failed: {cleanup}");
+            }
             return Err(AppError::io("could not persist spool record", error));
         }
         fs::rename(&temporary, path).map_err(|e| AppError::io("could not commit spool record", e))

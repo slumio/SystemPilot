@@ -18,55 +18,7 @@ use syspilot::ui::streamer::MdStreamer;
 // for output-content assertions.
 
 fn capture_streamer_output(inputs: &[&str]) -> String {
-    // Build a tiny inline Rust program that creates a MdStreamer, feeds the
-    // given inputs, flushes, and exits. We run it as a child and capture
-    // its stdout.
-    // For test speed we instead test via a Python-style approach: we fork,
-    // redirect stdout of the child to a pipe, run the streamer there, and
-    // read back the result.
-
-    // Simpler approach: use libc::pipe + fork
-    let mut fds = [0i32; 2];
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe failed");
-    let pipe_read = fds[0];
-    let pipe_write = fds[1];
-
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0, "fork failed");
-
-    if pid == 0 {
-        // Child: redirect stdout to write end of pipe
-        unsafe {
-            libc::dup2(pipe_write, 1); // stdout = pipe_write
-            libc::close(pipe_read);
-            libc::close(pipe_write);
-        }
-        let mut s = MdStreamer::new();
-        for &input in inputs {
-            s.print(input);
-        }
-        s.flush();
-        unsafe { libc::_exit(0) };
-    }
-
-    // Parent: close write end, read from read end
-    unsafe { libc::close(pipe_write) };
-
-    let mut output = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = unsafe { libc::read(pipe_read, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 {
-            break;
-        }
-        output.extend_from_slice(&buf[..n as usize]);
-    }
-    unsafe {
-        libc::close(pipe_read);
-        libc::waitpid(pid, std::ptr::null_mut(), 0);
-    }
-
-    String::from_utf8_lossy(&output).into_owned()
+    MdStreamer::render_chunks(inputs)
 }
 
 // ── Basic API: no panic ───────────────────────────────────────────────────────

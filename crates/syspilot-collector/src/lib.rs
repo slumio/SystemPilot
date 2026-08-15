@@ -1,14 +1,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 //! Kernel-event ingress and bounded handoff.
 //!
-//! One producer owns `push` and one consumer owns `pop`. This matches the
-//! intended topology of a ring-buffer reader feeding one correlator thread.
-//! Multiple producers require one instance per producer; they must not share a
-//! ring because that would invalidate the SPSC memory-ordering invariant.
+//! The intended topology is one ring-buffer reader feeding one correlator
+//! thread. The bounded queue remains memory-safe if that topology expands;
+//! capacity and drop accounting stay explicit under contention.
 /// Canonical fleet-control schema migration, embedded for contract tests and tooling.
 pub const FLEET_SCHEMA_V1: &str = include_str!("../../../deploy/fleet/postgres/001_initial.sql");
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use syspilot_abi::RawEvent;
 
@@ -58,70 +57,27 @@ impl Counters {
     }
 }
 
-/// A fixed-capacity, allocation-free, single-producer/single-consumer ring.
-///
-/// Its indices are isolated on separate cache lines to prevent producer and
-/// consumer traffic from false-sharing under sustained event rates.
+/// A fixed-capacity, lock-free queue that performs no allocation after construction.
 pub struct SpscRing<T: Copy, const CAPACITY: usize> {
-    producer: CacheLine<AtomicUsize>,
-    consumer: CacheLine<AtomicUsize>,
-    slots: [std::cell::UnsafeCell<std::mem::MaybeUninit<T>>; CAPACITY],
+    queue: crossbeam_queue::ArrayQueue<T>,
 }
-
-/// `UnsafeCell` only protects independent slots. Producer and consumer access
-/// a slot exclusively according to acquire/release index ownership.
-///
-/// # Safety
-/// Callers must maintain the SPSC contract: exactly one producer calls
-/// `try_push`, and exactly one consumer calls `try_pop`. The public API cannot
-/// encode this runtime topology, so the queue is the sole audited unsafe core.
-unsafe impl<T: Copy + Send, const CAPACITY: usize> Send for SpscRing<T, CAPACITY> {}
-/// See the type-level invariant above; only one producer and one consumer may
-/// invoke the respective methods concurrently.
-unsafe impl<T: Copy + Send, const CAPACITY: usize> Sync for SpscRing<T, CAPACITY> {}
-
-#[repr(align(64))]
-struct CacheLine<T>(T);
 
 impl<T: Copy, const CAPACITY: usize> SpscRing<T, CAPACITY> {
     pub fn new() -> Self {
         assert!(CAPACITY.is_power_of_two() && CAPACITY >= 2);
         Self {
-            producer: CacheLine(AtomicUsize::new(0)),
-            consumer: CacheLine(AtomicUsize::new(0)),
-            slots: std::array::from_fn(|_| {
-                std::cell::UnsafeCell::new(std::mem::MaybeUninit::uninit())
-            }),
+            queue: crossbeam_queue::ArrayQueue::new(CAPACITY - 1),
         }
     }
 
     /// Producer-only operation. Returns the event when full, without blocking.
     pub fn try_push(&self, value: T) -> Result<(), T> {
-        let head = self.producer.0.load(Ordering::Relaxed);
-        let next = (head + 1) & (CAPACITY - 1);
-        if next == self.consumer.0.load(Ordering::Acquire) {
-            return Err(value);
-        }
-        // SAFETY: the producer exclusively owns `head` until publishing `next`
-        // with Release. The consumer cannot observe this slot before that store.
-        unsafe { (*self.slots[head].get()).write(value) };
-        self.producer.0.store(next, Ordering::Release);
-        Ok(())
+        self.queue.push(value)
     }
 
     /// Consumer-only operation. Never blocks or allocates.
     pub fn try_pop(&self) -> Option<T> {
-        let tail = self.consumer.0.load(Ordering::Relaxed);
-        if tail == self.producer.0.load(Ordering::Acquire) {
-            return None;
-        }
-        // SAFETY: producer published this slot with Release, observed above by
-        // Acquire. The consumer exclusively owns `tail` until it advances it.
-        let value = unsafe { (*self.slots[tail].get()).assume_init_read() };
-        self.consumer
-            .0
-            .store((tail + 1) & (CAPACITY - 1), Ordering::Release);
-        Some(value)
+        self.queue.pop()
     }
 }
 
@@ -239,6 +195,21 @@ mod tests {
         assert_eq!(ring.try_pop(), Some(1));
         assert_eq!(ring.try_pop(), Some(2));
         assert_eq!(ring.try_pop(), Some(3));
+    }
+
+    #[test]
+    fn million_event_handoff_stays_within_throughput_budget() {
+        let ring = SpscRing::<u64, 1024>::new();
+        let started = std::time::Instant::now();
+        for sequence in 0..1_000_000 {
+            ring.try_push(sequence)
+                .expect("interleaved queue is not full");
+            assert_eq!(ring.try_pop(), Some(sequence));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "one million event handoffs exceeded the 10 second debug-build budget"
+        );
     }
 
     #[test]

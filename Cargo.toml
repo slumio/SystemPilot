@@ -80,6 +80,8 @@ nix = { version = "0.28.0", features = ["process", "signal", "term", "socket", "
 
 # Libc for low-level POSIX / Linux constants
 libc = "0.2.153"
+crossterm = "=0.29.0"
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
 
 [profile.release]
 opt-level = 3
@@ -87,3 +89,5 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+overflow-checks = true
+incremental = false

@@ -7,6 +7,7 @@ use crate::alert::AlertStore;
 use crate::distributed::{ProcessAlertEngine, TelemetryKind, TelemetryPublisher};
 use dashmap::DashMap;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NETLINK_STATE: AtomicI32 = AtomicI32::new(0);
 static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_WRITE_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 struct ProcessNode {
@@ -86,6 +88,7 @@ fn write_health(state: &str, publisher: &TelemetryPublisher) {
         "socket": crate::config::daemon_socket_label(),
         "netlink_state": match NETLINK_STATE.load(Ordering::Relaxed) { 1 => "active", 2 => "degraded", _ => "starting" },
         "dropped_events": DROPPED_EVENTS.load(Ordering::Relaxed),
+        "response_write_failures": RESPONSE_WRITE_FAILURES.load(Ordering::Relaxed),
         "exporter": publisher.health(),
     });
     let temporary = health_path.with_extension("tmp");
@@ -155,22 +158,27 @@ fn netlink_listener(
     use libc::*;
 
     // socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR)
-    let nl_fd = unsafe { socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_CONNECTOR) };
-    if nl_fd < 0 {
+    // SAFETY: `socket` receives constant Linux Netlink arguments and returns an owned descriptor.
+    let raw_fd = unsafe { socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_CONNECTOR) };
+    if raw_fd < 0 {
         NETLINK_STATE.store(2, Ordering::Relaxed);
         tracing::warn!("[daemon] Netlink socket failed; serving the initial /proc snapshot without live events.");
         return;
     }
+    // SAFETY: `raw_fd` was just returned by `socket`, is non-negative, and has no other owner.
+    let nl_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
     // Build sockaddr_nl
+    // SAFETY: all-zero is the kernel-defined initialization for sockaddr_nl padding/optional fields.
     let mut addr: sockaddr_nl = unsafe { std::mem::zeroed() };
     addr.nl_family = AF_NETLINK as u16;
     addr.nl_groups = 1; // CN_IDX_PROC bitmask
-    addr.nl_pid = unsafe { getpid() } as u32;
+    addr.nl_pid = std::process::id();
 
+    // SAFETY: pointers reference a live sockaddr_nl for its exact size; the descriptor is owned.
     if unsafe {
         bind(
-            nl_fd,
+            nl_fd.as_raw_fd(),
             &addr as *const _ as *const sockaddr,
             std::mem::size_of_val(&addr) as u32,
         )
@@ -180,7 +188,6 @@ fn netlink_listener(
         tracing::error!(
             "[daemon] Netlink bind failed; serving the initial /proc snapshot without live events."
         );
-        unsafe { close(nl_fd) };
         return;
     }
 
@@ -193,7 +200,7 @@ fn netlink_listener(
     let nlmsg_len: u32 = 40;
     sub_buf[0..4].copy_from_slice(&nlmsg_len.to_ne_bytes());
     sub_buf[4..6].copy_from_slice(&(3u16).to_ne_bytes()); // NLMSG_DONE
-    sub_buf[12..16].copy_from_slice(&(unsafe { getpid() } as u32).to_ne_bytes());
+    sub_buf[12..16].copy_from_slice(&std::process::id().to_ne_bytes());
     // cn_msg starts at offset 16: id.idx=CN_IDX_PROC(1), id.val=CN_VAL_PROC(1), len=4
     sub_buf[16..20].copy_from_slice(&(1u32).to_ne_bytes()); // idx
     sub_buf[20..24].copy_from_slice(&(1u32).to_ne_bytes()); // val
@@ -201,11 +208,13 @@ fn netlink_listener(
                                                             // data = PROC_CN_MCAST_LISTEN = 1
     sub_buf[36..40].copy_from_slice(&(1u32).to_ne_bytes());
 
+    // SAFETY: all-zero is the kernel-defined initialization for sockaddr_nl padding/optional fields.
     let mut kernel_addr: sockaddr_nl = unsafe { std::mem::zeroed() };
     kernel_addr.nl_family = AF_NETLINK as u16;
+    // SAFETY: both buffers remain live for the call and their exact lengths are supplied.
     let sent = unsafe {
         sendto(
-            nl_fd,
+            nl_fd.as_raw_fd(),
             sub_buf.as_ptr() as *const c_void,
             sub_buf.len(),
             0,
@@ -220,7 +229,6 @@ fn netlink_listener(
             "[daemon] Netlink Process Connector subscription failed: {}; serving the initial /proc snapshot without live events.",
             error
         );
-        unsafe { close(nl_fd) };
         return;
     }
 
@@ -230,16 +238,19 @@ fn netlink_listener(
     let mut connector_confirmed = false;
 
     while running.load(Ordering::Relaxed) {
+        // SAFETY: recv writes at most recv_buf.len() bytes into a valid mutable buffer.
         let len = unsafe {
             recv(
-                nl_fd,
+                nl_fd.as_raw_fd(),
                 recv_buf.as_mut_ptr() as *mut c_void,
                 recv_buf.len(),
                 0,
             )
         };
         if len < 0 {
-            let err = unsafe { *libc::__errno_location() };
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
             if err == EINTR {
                 continue;
             }
@@ -280,7 +291,6 @@ fn netlink_listener(
                         error
                     );
                     NETLINK_STATE.store(2, Ordering::Relaxed);
-                    unsafe { close(nl_fd) };
                     return;
                 }
                 let aligned = (msg_len + 3) & !3;
@@ -430,7 +440,6 @@ fn netlink_listener(
             offset += aligned.max(16);
         }
     }
-    unsafe { close(nl_fd) };
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
@@ -563,7 +572,10 @@ fn handle_client(
         "{\"status\":\"error\",\"message\":\"invalid json\"}".to_string()
     };
 
-    let _ = stream.write_all(response.as_bytes());
+    if let Err(error) = stream.write_all(response.as_bytes()) {
+        RESPONSE_WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!("[daemon] response write failed: {error}");
+    }
     active.fetch_sub(1, Ordering::Relaxed);
 }
 
@@ -584,7 +596,11 @@ fn unix_socket_server(
     }
     let socket_path = crate::config::daemon_socket_path();
     if !crate::config::daemon_socket_is_abstract() {
-        let _ = std::fs::remove_file(&socket_path);
+        if let Err(error) = std::fs::remove_file(&socket_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("[daemon] stale socket cleanup failed: {error}");
+            }
+        }
     }
 
     let socket_addr = match crate::config::daemon_socket_addr() {
@@ -602,13 +618,19 @@ fn unix_socket_server(
         }
     };
     if !crate::config::daemon_socket_is_abstract() {
-        let _ = std::fs::set_permissions(
+        if let Err(error) = std::fs::set_permissions(
             &socket_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o660),
-        );
+        ) {
+            tracing::error!("[daemon] could not secure socket permissions: {error}");
+            return;
+        }
     }
 
-    listener.set_nonblocking(false).ok();
+    if let Err(error) = listener.set_nonblocking(true) {
+        tracing::error!("[daemon] could not configure nonblocking listener: {error}");
+        return;
+    }
     tracing::info!(
         "[daemon] UNIX socket listening at {}",
         crate::config::daemon_socket_label()
@@ -624,10 +646,8 @@ fn unix_socket_server(
             last_heartbeat = Instant::now();
         }
         // Use select-like timeout via accept with a 1s deadline
-        listener.set_nonblocking(true).ok();
         match listener.accept() {
             Ok((stream, _)) => {
-                listener.set_nonblocking(false).ok();
                 if active.load(Ordering::Relaxed) >= MAX_CLIENTS {
                     tracing::warn!("[daemon] Too many clients, dropping connection.");
                     continue;
@@ -639,7 +659,6 @@ fn unix_socket_server(
                 std::thread::spawn(move || handle_client(stream, tree2, rx2, active2));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                listener.set_nonblocking(false).ok();
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(_) => {
@@ -649,7 +668,9 @@ fn unix_socket_server(
     }
 
     if !crate::config::daemon_socket_is_abstract() {
-        let _ = std::fs::remove_file(&socket_path);
+        if let Err(error) = std::fs::remove_file(&socket_path) {
+            tracing::warn!("[daemon] shutdown socket cleanup failed: {error}");
+        }
     }
     write_health("stopped", &publisher);
 }
@@ -718,9 +739,16 @@ pub fn run_daemon(config: crate::config::Config) -> i32 {
         unix_socket_server(tree_sock, rx, run_sock, publisher_sock);
     });
 
-    nl_thread.join().ok();
-    sock_thread.join().ok();
-    0
+    let mut exit = 0;
+    if nl_thread.join().is_err() {
+        tracing::error!("[daemon] netlink worker panicked");
+        exit = 1;
+    }
+    if sock_thread.join().is_err() {
+        tracing::error!("[daemon] socket worker panicked");
+        exit = 1;
+    }
+    exit
 }
 
 #[cfg(test)]

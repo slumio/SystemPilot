@@ -114,8 +114,7 @@ impl MdStreamer {
         0
     }
 
-    /// Feed a chunk of text to the streamer.
-    pub fn print(&mut self, text: &str) {
+    fn render_chunk(&mut self, text: &str) -> String {
         self.buffer.push_str(text);
         let mut out = String::with_capacity(text.len() * 2);
 
@@ -125,10 +124,9 @@ impl MdStreamer {
             if consumed > 0 {
                 self.pos += consumed;
             } else {
-                let c = self.buffer[self.pos..]
-                    .chars()
-                    .next()
-                    .expect("streamer position is within the buffer");
+                let Some(c) = self.buffer[self.pos..].chars().next() else {
+                    break;
+                };
                 self.pos += c.len_utf8();
                 if c == '\n' {
                     self.is_newline = true;
@@ -149,22 +147,15 @@ impl MdStreamer {
             }
         }
 
-        if !out.is_empty() {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            let _ = handle.write_all(out.as_bytes());
-            let _ = handle.flush();
-        }
-
         // Compact: discard consumed bytes
         if self.pos > 0 {
             self.buffer.drain(..self.pos);
             self.pos = 0;
         }
+        out
     }
 
-    /// Drain the remaining tail (called at end of stream).
-    pub fn flush(&mut self) {
+    fn finish(&mut self) -> String {
         let mut out = String::with_capacity(self.buffer.len() * 2);
 
         while self.pos < self.buffer.len() {
@@ -172,10 +163,9 @@ impl MdStreamer {
             if consumed > 0 {
                 self.pos += consumed;
             } else {
-                let c = self.buffer[self.pos..]
-                    .chars()
-                    .next()
-                    .expect("streamer position is within the buffer");
+                let Some(c) = self.buffer[self.pos..].chars().next() else {
+                    break;
+                };
                 self.pos += c.len_utf8();
                 if c == '\n' {
                     self.is_newline = true;
@@ -198,13 +188,47 @@ impl MdStreamer {
 
         out.push_str("\x1b[0m"); // full reset at stream end
 
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
-        let _ = handle.write_all(out.as_bytes());
-        let _ = handle.flush();
-
         self.buffer.clear();
         self.pos = 0;
+        out
+    }
+
+    pub fn try_print(&mut self, text: &str) -> io::Result<()> {
+        let out = self.render_chunk(text);
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        handle.write_all(out.as_bytes())?;
+        handle.flush()
+    }
+
+    pub fn print(&mut self, text: &str) {
+        if let Err(error) = self.try_print(text) {
+            eprintln!("terminal output failed: {error}");
+        }
+    }
+
+    pub fn try_flush(&mut self) -> io::Result<()> {
+        let out = self.finish();
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        handle.write_all(out.as_bytes())?;
+        handle.flush()
+    }
+
+    pub fn flush(&mut self) {
+        if let Err(error) = self.try_flush() {
+            eprintln!("terminal output flush failed: {error}");
+        }
+    }
+
+    pub fn render_chunks(inputs: &[&str]) -> String {
+        let mut streamer = Self::new();
+        let mut output = String::new();
+        for input in inputs {
+            output.push_str(&streamer.render_chunk(input));
+        }
+        output.push_str(&streamer.finish());
+        output
     }
 }
 

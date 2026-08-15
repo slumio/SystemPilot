@@ -329,7 +329,10 @@ The CLI handles enabling export and basic rules. Edit `~/.syspilot/config.json` 
     "enabled": true,
     "endpoint": "https://collector.example/v1/telemetry",
     "node_id": "node-a",
-    "bearer_token": "replace-with-a-secret",
+    "bearer_credential": {
+      "source": "environment",
+      "variable": "SYSPILOT_TELEMETRY_TOKEN"
+    },
     "attributes": { "environment": "production", "region": "in-1" },
     "export_policy": {
       "batch_size": 256,
@@ -356,7 +359,9 @@ SysPilot validates the endpoint, node ID, rule IDs, and policy before starting t
 
 ## Configuration reference
 
-Configuration is stored at `~/.syspilot/config.json`. Do not commit this file when it contains credentials.
+Configuration schema v2 is stored at `~/.syspilot/config.json` and never contains
+credential values. It contains credential-source metadata; owner-only secret files
+default to `~/.syspilot/credentials/`. Do not commit either location.
 
 Create an inspectable local support artifact with:
 
@@ -369,8 +374,8 @@ The JSON bundle is written owner-only and never uploaded automatically. Credenti
 
 | Field | Meaning |
 |---|---|
-| `active_provider` | `gemini`, `ollama`, or `syspilot`. |
-| `gemini_api_key`, `syspilot_api_key` | Provider credentials. Environment variables can override these keys. |
+| `active_provider` | `disabled`, `gemini`, `ollama`, or `syspilot`. |
+| `gemini_credential`, `syspilot_credential` | Secret-free `CredentialRef` source metadata. Values resolve at runtime from environment, owner-only files, or systemd credentials. |
 | `ollama_url`, `ollama_model` | Local Ollama connection and model. |
 | `gemini_model`, `syspilot_model` | Selected remote model. |
 | `ai_request_timeout_seconds`, `ai_connect_timeout_seconds` | AI HTTP limits. Values must be greater than zero. |

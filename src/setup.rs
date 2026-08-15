@@ -101,6 +101,16 @@ pub fn run(mode: InterfaceMode) -> bool {
 }
 
 fn wizard(full_screen: bool) -> Result<(), String> {
+    let config_path = config::get_syspilot_dir().join("config.json");
+    let original_config = match std::fs::read(&config_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "could not preserve configuration for rollback: {error}"
+            ))
+        }
+    };
     let mut cfg =
         config::load_checked().map_err(|e| format!("could not load configuration: {e}"))?;
     screen(full_screen, "Deployment mode");
@@ -121,6 +131,7 @@ fn wizard(full_screen: bool) -> Result<(), String> {
     let mut endpoint = String::new();
     let mut node_id = String::new();
     let mut credential = String::new();
+    let mut credential_variable = None;
     if deployment != DeploymentMode::LocalOnly {
         endpoint = prompt("Collector HTTPS endpoint")?;
         node_id = prompt("Node ID")?;
@@ -129,6 +140,7 @@ fn wizard(full_screen: bool) -> Result<(), String> {
         } else {
             "SYSPILOT_TELEMETRY_TOKEN"
         };
+        credential_variable = Some(variable.to_string());
         credential = std::env::var(variable).map_err(|_| {
             format!("{variable} is required; credentials are never echoed by the setup UI")
         })?;
@@ -159,6 +171,9 @@ fn wizard(full_screen: bool) -> Result<(), String> {
             if let Ok(key) = std::env::var("GEMINI_API_KEY") {
                 if !key.is_empty() {
                     cfg.gemini_api_key = key;
+                    cfg.gemini_credential = crate::credentials::CredentialRef::Environment {
+                        variable: "GEMINI_API_KEY".into(),
+                    };
                 }
             }
         }
@@ -168,6 +183,7 @@ fn wizard(full_screen: bool) -> Result<(), String> {
             cfg.ollama_url = value;
         }
         AiMode::Disabled => {
+            cfg.active_provider = "disabled".into();
             cfg.gemini_api_key.clear();
             cfg.syspilot_api_key.clear();
         }
@@ -185,13 +201,46 @@ fn wizard(full_screen: bool) -> Result<(), String> {
             cfg.distributed_telemetry.endpoint = endpoint.clone();
             cfg.distributed_telemetry.node_id = node_id.clone();
             cfg.distributed_telemetry.bearer_token = credential;
+            cfg.distributed_telemetry.bearer_credential =
+                crate::credentials::CredentialRef::Environment {
+                    variable: credential_variable
+                        .clone()
+                        .ok_or_else(|| "telemetry credential source is missing".to_string())?,
+                };
         }
-        DeploymentMode::HostedFleet => {
-            fleet::enroll(&mut cfg, endpoint.clone(), node_id.clone(), credential)
-                .map_err(|e| format!("fleet enrollment is invalid: {e}"))?
-        }
+        DeploymentMode::HostedFleet => fleet::enroll_with_reference(
+            &mut cfg,
+            endpoint.clone(),
+            node_id.clone(),
+            credential,
+            crate::credentials::CredentialRef::Environment {
+                variable: credential_variable
+                    .clone()
+                    .ok_or_else(|| "fleet credential source is missing".to_string())?,
+            },
+        )
+        .map_err(|e| format!("fleet enrollment is invalid: {e}"))?,
     }
     config::validate(&cfg).map_err(|e| format!("configuration is invalid: {e}"))?;
+
+    if deployment != DeploymentMode::LocalOnly {
+        screen(full_screen, "Telemetry preview");
+        let preview = crate::distributed::preview_envelope(
+            &cfg.distributed_telemetry,
+            crate::distributed::TelemetryKind::SystemSnapshot,
+            &crate::telemetry::collect_system_telemetry(),
+        )
+        .map_err(|e| format!("could not create telemetry preview: {e}"))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&preview)
+                .map_err(|e| format!("could not render telemetry preview: {e}"))?
+        );
+        if !confirm("Continue to final review after inspecting this export preview?")? {
+            println!("Setup cancelled; no configuration was changed.");
+            return Ok(());
+        }
+    }
 
     screen(full_screen, "Review and apply");
     println!("Deployment: {:?}", deployment);
@@ -231,19 +280,64 @@ fn wizard(full_screen: bool) -> Result<(), String> {
             "installation files could not be prepared; configuration was not applied".into(),
         );
     }
+    println!("Applied step 1/3: installation files prepared");
     config::save(&cfg).map_err(|e| format!("could not atomically save configuration: {e}"))?;
+    println!("Applied step 2/3: configuration committed");
     if !install::install_user_binary(false) {
+        let rollback = match original_config {
+            Some(bytes) => crate::config_migration::atomic_write(&config_path, &bytes),
+            None => std::fs::remove_file(&config_path)
+                .map_err(|e| crate::error::AppError::io("remove newly-created configuration", e)),
+        };
+        if let Err(error) = rollback {
+            return Err(format!(
+                "binary installation failed and configuration rollback also failed: {error}"
+            ));
+        }
         return Err("configuration was saved, but the user binary installation failed; run `syspilot install --binary`".into());
     }
+    println!("Applied step 3/3: user binary installed");
     println!("✅ Setup applied. Run `syspilot doctor` to review capability health.");
     Ok(())
 }
 
 fn screen(full_screen: bool, title: &str) {
     if full_screen {
-        print!("\x1b[2J\x1b[H");
+        use ratatui::{
+            backend::CrosstermBackend,
+            style::{Color, Modifier, Style},
+            widgets::{Block, Borders, Paragraph},
+            Terminal,
+        };
+        let backend = CrosstermBackend::new(io::stdout());
+        match Terminal::new(backend).and_then(|mut terminal| {
+            terminal.clear()?;
+            terminal.draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(format!("SysPilot setup — {title}"))
+                        .style(
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .block(Block::default().borders(Borders::ALL)),
+                    ratatui::layout::Rect::new(0, 0, frame.area().width, 3),
+                );
+            })?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                if let Err(error) =
+                    crossterm::execute!(io::stdout(), crossterm::cursor::MoveTo(0, 3))
+                {
+                    eprintln!("terminal cursor update failed: {error}");
+                }
+            }
+            Err(error) => eprintln!("terminal screen update failed: {error}"),
+        }
+    } else {
+        println!("SysPilot setup — {title}\n{}", "─".repeat(50));
     }
-    println!("SysPilot setup — {title}\n{}", "─".repeat(50));
 }
 
 fn choose(prompt_text: &str, options: &[&str], default: usize) -> Result<usize, String> {

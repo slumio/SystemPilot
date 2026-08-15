@@ -171,7 +171,10 @@ fn collect_process_telemetry_impl(pid: i32, include_children: bool) -> ProcessTe
                 pt.vsize_bytes = parse_u64(fields[20]);
             }
             if fields.len() > 21 {
-                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+                let page_size = nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(4096) as u64;
                 let page_size = if page_size == 0 { 4096 } else { page_size };
                 pt.rss_bytes = parse_u64(fields[21]).saturating_mul(page_size);
             }
@@ -373,7 +376,7 @@ pub fn serialize_telemetry_to_json(pt: &ProcessTelemetry, st: &SystemTelemetry) 
 }
 
 pub fn collect_ebpf_telemetry(pid: i32, duration_seconds: u32) -> String {
-    let has_privileges = unsafe { libc::getuid() } == 0
+    let has_privileges = nix::unistd::Uid::effective().is_root()
         || crate::utils::run_command_output("sudo -n true 2>/dev/null").1 == 0;
 
     if !has_privileges {
@@ -408,7 +411,7 @@ pub fn collect_ebpf_telemetry(pid: i32, duration_seconds: u32) -> String {
         filter = filter
     );
 
-    let bpftrace_bin = if unsafe { libc::getuid() } == 0 {
+    let bpftrace_bin = if nix::unistd::Uid::effective().is_root() {
         "bpftrace"
     } else {
         "sudo bpftrace"

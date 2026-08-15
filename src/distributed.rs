@@ -3,6 +3,7 @@
 //! The daemon only publishes typed envelopes. Transport, batching, retry behavior,
 //! authentication, node identity, and alert rules are supplied by configuration.
 
+use crate::credentials::CredentialRef;
 use crate::error::{AppError, AppResult};
 use crate::spool::{DiskSpool, DEFAULT_MAX_AGE_SECS, DEFAULT_MAX_BYTES};
 use crossbeam_channel::{Receiver, Sender};
@@ -360,7 +361,9 @@ pub struct DistributedTelemetryConfig {
     pub enabled: bool,
     pub endpoint: String,
     pub node_id: String,
+    #[serde(skip)]
     pub bearer_token: String,
+    pub bearer_credential: CredentialRef,
     pub attributes: BTreeMap<String, String>,
     pub export_policy: ExportPolicy,
     pub process_alert_rules: Vec<ProcessAlertRule>,
@@ -665,7 +668,11 @@ impl TelemetryPublisher {
             .quarantined
             .store(stats.quarantined, Ordering::Relaxed);
         // This is only a wake-up accelerator; the durable record is authoritative.
-        let _ = sender.try_send(envelope);
+        if sender.try_send(envelope).is_err() {
+            tracing::debug!(
+                "[telemetry] wake-up queue saturated; durable spool retains the record"
+            );
+        }
         Ok(())
     }
     pub fn dropped_messages(&self) -> u64 {

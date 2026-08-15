@@ -1,4 +1,5 @@
 use crate::config_migration::{self, CURRENT_CONFIG_SCHEMA_VERSION};
+use crate::credentials::{CredentialRef, CredentialResolver};
 use crate::distributed::DistributedTelemetryConfig;
 use crate::error::{AppError, AppResult};
 use crate::fleet::FleetEnrollment;
@@ -16,14 +17,20 @@ pub struct Config {
     #[serde(default = "default_provider")]
     pub active_provider: String,
 
-    #[serde(default)]
+    #[serde(skip)]
     pub gemini_api_key: String,
+
+    #[serde(default)]
+    pub gemini_credential: CredentialRef,
 
     #[serde(default = "default_gemini_model")]
     pub gemini_model: String,
 
-    #[serde(default)]
+    #[serde(skip)]
     pub syspilot_api_key: String,
+
+    #[serde(default)]
+    pub syspilot_credential: CredentialRef,
 
     #[serde(default = "default_syspilot_model")]
     pub syspilot_model: String,
@@ -105,8 +112,10 @@ impl Default for Config {
             schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
             active_provider: default_provider(),
             gemini_api_key: String::new(),
+            gemini_credential: CredentialRef::None,
             gemini_model: default_gemini_model(),
             syspilot_api_key: String::new(),
+            syspilot_credential: CredentialRef::None,
             syspilot_model: default_syspilot_model(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
@@ -145,7 +154,10 @@ pub fn daemon_runtime_dir() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|path| !path.is_empty()) {
         return PathBuf::from(runtime_dir).join("syspilot");
     }
-    PathBuf::from(format!("/tmp/syspilot-{}", unsafe { libc::geteuid() }))
+    PathBuf::from(format!(
+        "/tmp/syspilot-{}",
+        nix::unistd::Uid::effective().as_raw()
+    ))
 }
 
 pub fn daemon_socket_path() -> PathBuf {
@@ -165,7 +177,7 @@ pub fn daemon_socket_is_abstract() -> bool {
 pub fn daemon_socket_addr() -> io::Result<SocketAddr> {
     if daemon_socket_is_abstract() {
         SocketAddr::from_abstract_name(
-            format!("syspilot-{}", unsafe { libc::geteuid() }).as_bytes(),
+            format!("syspilot-{}", nix::unistd::Uid::effective().as_raw()).as_bytes(),
         )
     } else {
         SocketAddr::from_pathname(daemon_socket_path())
@@ -174,7 +186,7 @@ pub fn daemon_socket_addr() -> io::Result<SocketAddr> {
 
 pub fn daemon_socket_label() -> String {
     if daemon_socket_is_abstract() {
-        format!("@syspilot-{}", unsafe { libc::geteuid() })
+        format!("@syspilot-{}", nix::unistd::Uid::effective().as_raw())
     } else {
         daemon_socket_path().display().to_string()
     }
@@ -221,6 +233,22 @@ pub fn validate(cfg: &Config) -> AppResult<()> {
             "AI request and connect timeouts must be greater than zero".into(),
         ));
     }
+    if !["disabled", "gemini", "ollama", "syspilot"].contains(&cfg.active_provider.as_str()) {
+        return Err(AppError::Validation(format!(
+            "invalid AI provider '{}'; use disabled, gemini, ollama, or syspilot",
+            cfg.active_provider
+        )));
+    }
+    if (!cfg.gemini_api_key.is_empty() && cfg.gemini_credential == CredentialRef::None)
+        || (!cfg.syspilot_api_key.is_empty() && cfg.syspilot_credential == CredentialRef::None)
+        || (!cfg.distributed_telemetry.bearer_token.is_empty()
+            && cfg.distributed_telemetry.bearer_credential == CredentialRef::None)
+        || (!cfg.fleet.credential.is_empty() && cfg.fleet.credential_ref == CredentialRef::None)
+    {
+        return Err(AppError::Validation(
+            "runtime credentials must have a CredentialRef before configuration is saved".into(),
+        ));
+    }
     reqwest::Url::parse(&cfg.ollama_url)
         .map_err(|error| AppError::Validation(format!("invalid Ollama URL: {error}")))?;
     reqwest::Url::parse(&cfg.syspilot_url)
@@ -240,15 +268,38 @@ pub fn load_checked() -> AppResult<Config> {
         Config::default()
     };
 
-    // Environment variable overrides
+    adopt_systemd_credential(&mut cfg.gemini_credential, "gemini-api-key");
+    adopt_systemd_credential(&mut cfg.syspilot_credential, "syspilot-api-key");
+    adopt_systemd_credential(
+        &mut cfg.distributed_telemetry.bearer_credential,
+        "telemetry-token",
+    );
+    adopt_systemd_credential(&mut cfg.fleet.credential_ref, "fleet-token");
+
+    cfg.gemini_api_key = CredentialResolver::resolve(&cfg.gemini_credential)?.unwrap_or_default();
+    cfg.syspilot_api_key =
+        CredentialResolver::resolve(&cfg.syspilot_credential)?.unwrap_or_default();
+    cfg.distributed_telemetry.bearer_token =
+        CredentialResolver::resolve(&cfg.distributed_telemetry.bearer_credential)?
+            .unwrap_or_default();
+    cfg.fleet.credential =
+        CredentialResolver::resolve(&cfg.fleet.credential_ref)?.unwrap_or_default();
+
+    // Environment variables are explicit runtime credential sources and are never persisted.
     if let Ok(key) = std::env::var("GEMINI_API_KEY") {
         if !key.is_empty() {
             cfg.gemini_api_key = key;
+            cfg.gemini_credential = CredentialRef::Environment {
+                variable: "GEMINI_API_KEY".into(),
+            };
         }
     }
     if let Ok(key) = std::env::var("SYSPILOT_API_KEY") {
         if !key.is_empty() {
             cfg.syspilot_api_key = key;
+            cfg.syspilot_credential = CredentialRef::Environment {
+                variable: "SYSPILOT_API_KEY".into(),
+            };
         }
     }
 
@@ -264,6 +315,20 @@ pub fn load_checked() -> AppResult<Config> {
     Ok(cfg)
 }
 
+fn adopt_systemd_credential(reference: &mut CredentialRef, name: &str) {
+    if *reference != CredentialRef::None {
+        return;
+    }
+    let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY") else {
+        return;
+    };
+    if std::path::Path::new(&directory).join(name).is_file() {
+        *reference = CredentialRef::Systemd {
+            name: name.to_string(),
+        };
+    }
+}
+
 pub fn save(cfg: &Config) -> AppResult<()> {
     validate(cfg)?;
     let path = get_syspilot_dir().join("config.json");
@@ -271,6 +336,31 @@ pub fn save(cfg: &Config) -> AppResult<()> {
         AppError::Protocol(format!("could not encode SysPilot configuration: {error}"))
     })?;
     config_migration::atomic_write(&path, &json)
+}
+
+pub fn set_provider_credential(cfg: &mut Config, provider: &str, value: &str) -> AppResult<()> {
+    let filename = match provider {
+        "gemini" => "gemini-api-key",
+        "syspilot" => "syspilot-api-key",
+        _ => {
+            return Err(AppError::Validation(format!(
+                "provider '{provider}' does not use a stored credential"
+            )))
+        }
+    };
+    let reference = crate::credentials::store_owner_secret(
+        &get_syspilot_dir().join("credentials"),
+        filename,
+        value,
+    )?;
+    if provider == "gemini" {
+        cfg.gemini_api_key = value.into();
+        cfg.gemini_credential = reference;
+    } else {
+        cfg.syspilot_api_key = value.into();
+        cfg.syspilot_credential = reference;
+    }
+    Ok(())
 }
 
 pub const fn config_schema_version() -> u64 {

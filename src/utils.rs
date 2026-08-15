@@ -194,9 +194,12 @@ pub fn run_command_secure(args: &[String], input: &str) -> (String, i32) {
     };
 
     // Write stdin concurrently to avoid pipe deadlock on large payloads
+    let mut input_error = None;
     if !input.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
+            if let Err(error) = stdin.write_all(input.as_bytes()) {
+                input_error = Some(error);
+            }
             // stdin closes when dropped — sends EOF
         }
     } else {
@@ -212,6 +215,10 @@ pub fn run_command_secure(args: &[String], input: &str) -> (String, i32) {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !stderr.is_empty() {
         combined.push_str(&stderr);
+    }
+    if let Some(error) = input_error {
+        combined.push_str(&format!("stdin write failed: {error}"));
+        return (combined, -1);
     }
     let code = output.status.code().unwrap_or(-1);
     (combined, code)
@@ -246,8 +253,9 @@ where
     let stdin_handle = if let Some(mut stdin) = child.stdin.take() {
         let input_clone = input.clone();
         Some(std::thread::spawn(move || {
-            let _ = stdin.write_all(input_clone.as_bytes());
+            let result = stdin.write_all(input_clone.as_bytes());
             // stdin drops here, sending EOF
+            result
         }))
     } else {
         None
@@ -269,14 +277,21 @@ where
         }
     }
 
-    if let Some(h) = stdin_handle {
-        let _ = h.join();
-    }
+    let stdin_ok = stdin_handle.is_none_or(|handle| {
+        handle.join().is_ok_and(|result| {
+            result.map(|_| true).unwrap_or_else(|error| {
+                eprintln!("stdin write failed: {error}");
+                false
+            })
+        })
+    });
 
     // Surface curl stderr
     if let Some(mut stderr) = child.stderr.take() {
         let mut err_out = String::new();
-        let _ = stderr.read_to_string(&mut err_out);
+        if let Err(error) = stderr.read_to_string(&mut err_out) {
+            eprintln!("stderr read failed: {error}");
+        }
         let trimmed = err_out.trim();
         if !trimmed.is_empty() {
             eprintln!("\x1b[33m[curl] {}\x1b[0m", trimmed);
@@ -288,5 +303,5 @@ where
         Err(_) => return (false, -1),
     };
     let code = status.code().unwrap_or(-1);
-    (code == 0, code)
+    (code == 0 && stdin_ok, code)
 }

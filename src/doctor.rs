@@ -84,17 +84,31 @@ fn storage_check() -> DiagnosticV1 {
 
 fn ai_check(cfg: &config::Config) -> DiagnosticV1 {
     let (configured, detail) = match cfg.active_provider.as_str() {
+        "disabled" => (
+            true,
+            "AI explicitly disabled; offline diagnostics remain active".into(),
+        ),
         "ollama" => (
             true,
             format!("optional Ollama provider at {}", cfg.ollama_url),
         ),
         "gemini" => (
             !cfg.gemini_api_key.is_empty(),
-            format!("optional Gemini provider, model {}", cfg.gemini_model),
+            format!(
+                "optional Gemini provider, model {}; credential source={} available={}",
+                cfg.gemini_model,
+                crate::credentials::CredentialResolver::status(&cfg.gemini_credential).source,
+                crate::credentials::CredentialResolver::status(&cfg.gemini_credential).available
+            ),
         ),
         "syspilot" => (
             !cfg.syspilot_api_key.is_empty(),
-            format!("optional SysPilot provider, model {}", cfg.syspilot_model),
+            format!(
+                "optional SysPilot provider, model {}; credential source={} available={}",
+                cfg.syspilot_model,
+                crate::credentials::CredentialResolver::status(&cfg.syspilot_credential).source,
+                crate::credentials::CredentialResolver::status(&cfg.syspilot_credential).available
+            ),
         ),
         provider => (false, format!("unknown provider {provider}")),
     };
@@ -265,6 +279,27 @@ pub fn collect() -> crate::error::AppResult<OutputEnvelopeV1<DoctorDataV1>> {
             "commands requiring configuration cannot start",
             Some("syspilot config rollback"),
         )),
+    }
+    let legacy_backup = config::get_syspilot_dir().join("config.pre-v2.json");
+    if legacy_backup.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let secure = std::fs::metadata(&legacy_backup)
+            .map(|metadata| metadata.permissions().mode() & 0o077 == 0)
+            .unwrap_or(false);
+        diagnostics.push(diagnostic(
+            "legacy_secret_backup",
+            if secure {
+                CapabilityState::Degraded
+            } else {
+                CapabilityState::Misconfigured
+            },
+            format!(
+                "{} exists; it may contain legacy serialized credentials; owner_only={secure}",
+                legacy_backup.display()
+            ),
+            "rollback evidence must be protected and may contain secrets",
+            Some("after the rollback window, archive securely or remove config.pre-v2.json"),
+        ));
     }
     diagnostics.push(daemon_check());
     let outcome = if diagnostics.iter().any(|item| {

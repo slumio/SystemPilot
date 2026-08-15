@@ -38,8 +38,10 @@ fn config_serialises_and_deserialises() {
         schema_version: config::config_schema_version(),
         active_provider: "ollama".to_string(),
         gemini_api_key: "key123".to_string(),
+        gemini_credential: Default::default(),
         gemini_model: "gemini-3.6-flash".to_string(),
         syspilot_api_key: String::new(),
+        syspilot_credential: Default::default(),
         syspilot_model: "syspilot-1".to_string(),
         ollama_url: "http://localhost:11434".to_string(),
         ollama_model: "llama3".to_string(),
@@ -57,7 +59,8 @@ fn config_serialises_and_deserialises() {
     let restored: Config = serde_json::from_str(&json).unwrap();
 
     assert_eq!(restored.active_provider, original.active_provider);
-    assert_eq!(restored.gemini_api_key, original.gemini_api_key);
+    assert!(restored.gemini_api_key.is_empty());
+    assert!(!json.contains("key123"));
     assert_eq!(restored.chunk_strategy, original.chunk_strategy);
     assert_eq!(restored.ollama_model, original.ollama_model);
     assert_eq!(restored.embedding_provider, original.embedding_provider);
@@ -96,12 +99,13 @@ fn save_and_load_roundtrip() {
     env::set_var("HOME", tmp.path());
     env::remove_var("GEMINI_API_KEY");
 
-    let cfg = Config {
+    let mut cfg = Config {
         active_provider: "syspilot".to_string(),
         gemini_api_key: "abc".to_string(),
         ollama_model: "mistral".to_string(),
         ..Config::default()
     };
+    config::set_provider_credential(&mut cfg, "gemini", "abc").unwrap();
     config::save(&cfg).expect("save failed");
 
     let loaded = config::load_checked().unwrap();
@@ -132,6 +136,41 @@ fn gemini_api_key_env_override() {
 
     restore_env_var("HOME", orig_home);
     restore_env_var("GEMINI_API_KEY", orig_gemini_key);
+}
+
+#[test]
+fn systemd_credentials_are_adopted_without_persisting_values() {
+    use std::env;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().expect("environment lock poisoned");
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let credentials = directory.path().join("runtime-credentials");
+    fs::create_dir_all(&credentials).unwrap();
+    let credential = credentials.join("gemini-api-key");
+    fs::write(&credential, "systemd-secret\n").unwrap();
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let old_home = env::var_os("SYSPILOT_HOME");
+    let old_directory = env::var_os("CREDENTIALS_DIRECTORY");
+    let old_key = env::var_os("GEMINI_API_KEY");
+    env::set_var("SYSPILOT_HOME", &home);
+    env::set_var("CREDENTIALS_DIRECTORY", &credentials);
+    env::remove_var("GEMINI_API_KEY");
+
+    let loaded = config::load_checked().unwrap();
+    assert_eq!(loaded.gemini_api_key, "systemd-secret");
+    assert!(matches!(
+        loaded.gemini_credential,
+        syspilot::credentials::CredentialRef::Systemd { .. }
+    ));
+    let encoded = serde_json::to_string(&loaded).unwrap();
+    assert!(!encoded.contains("systemd-secret"));
+
+    restore_env_var("SYSPILOT_HOME", old_home);
+    restore_env_var("CREDENTIALS_DIRECTORY", old_directory);
+    restore_env_var("GEMINI_API_KEY", old_key);
 }
 
 // ── Gemini model migration and validation ─────────────────────────────────────
@@ -233,7 +272,12 @@ fn unversioned_config_is_backed_up_and_migrated_before_env_overrides() {
     let migrated: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(migrated["schema_version"], config::config_schema_version());
-    assert_eq!(migrated["gemini_api_key"], "disk-key");
+    assert!(migrated.get("gemini_api_key").is_none());
+    assert_eq!(migrated["gemini_credential"]["source"], "file");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("credentials/gemini-api-key")).unwrap(),
+        "disk-key"
+    );
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         fs::metadata(backup).unwrap().permissions().mode() & 0o777,
@@ -280,7 +324,7 @@ fn rollback_preserves_current_file_and_restores_pre_migration_bytes() {
     config::rollback_previous().unwrap();
     assert_eq!(fs::read(&active).unwrap(), original);
     assert_eq!(
-        fs::read(directory.path().join("config.pre-rollback-v1.json")).unwrap(),
+        fs::read(directory.path().join("config.pre-rollback-v2.json")).unwrap(),
         current_before_rollback
     );
 

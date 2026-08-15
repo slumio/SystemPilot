@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::credentials::CredentialRef;
 use crate::distributed::ExporterHealth;
 use crate::error::{AppError, AppResult};
 use crate::output::{CapabilityState, DiagnosticV1, Outcome, OutputEnvelopeV1};
@@ -11,7 +12,9 @@ pub struct FleetEnrollment {
     pub enabled: bool,
     pub endpoint: String,
     pub node_id: String,
+    #[serde(skip)]
     pub credential: String,
+    pub credential_ref: CredentialRef,
     pub enrolled_at_unix_nanos: u64,
     pub policy_source: String,
     pub upload_scope: Vec<String>,
@@ -52,11 +55,43 @@ pub fn enroll(
     node_id: String,
     credential: String,
 ) -> AppResult<()> {
+    let candidate = FleetEnrollment {
+        enabled: true,
+        endpoint: endpoint.clone(),
+        node_id: node_id.clone(),
+        credential: credential.clone(),
+        credential_ref: CredentialRef::None,
+        enrolled_at_unix_nanos: now_ns(),
+        policy_source: "local_enrollment".into(),
+        upload_scope: vec![
+            "process_lifecycle".into(),
+            "process_alert".into(),
+            "health".into(),
+        ],
+        last_acknowledgement_unix_nanos: None,
+    };
+    candidate.validate()?;
+    let credential_ref = crate::credentials::store_owner_secret(
+        &crate::config::get_syspilot_dir().join("credentials"),
+        "fleet-token",
+        &credential,
+    )?;
+    enroll_with_reference(config, endpoint, node_id, credential, credential_ref)
+}
+
+pub fn enroll_with_reference(
+    config: &mut Config,
+    endpoint: String,
+    node_id: String,
+    credential: String,
+    credential_ref: CredentialRef,
+) -> AppResult<()> {
     let enrollment = FleetEnrollment {
         enabled: true,
         endpoint: endpoint.clone(),
         node_id: node_id.clone(),
         credential: credential.clone(),
+        credential_ref: credential_ref.clone(),
         enrolled_at_unix_nanos: now_ns(),
         policy_source: "local_enrollment".into(),
         upload_scope: vec![
@@ -72,6 +107,7 @@ pub fn enroll(
     config.distributed_telemetry.endpoint = endpoint;
     config.distributed_telemetry.node_id = node_id;
     config.distributed_telemetry.bearer_token = credential;
+    config.distributed_telemetry.bearer_credential = credential_ref;
     crate::config::validate(config)
 }
 
@@ -82,9 +118,11 @@ pub fn disable(config: &mut Config) {
     if owns_destination {
         config.distributed_telemetry.enabled = false;
         config.distributed_telemetry.bearer_token.clear();
+        config.distributed_telemetry.bearer_credential = CredentialRef::None;
     }
     config.fleet.enabled = false;
     config.fleet.credential.clear();
+    config.fleet.credential_ref = CredentialRef::None;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +133,7 @@ pub struct FleetStatusV1 {
     pub policy_source: Option<String>,
     pub upload_scope: Vec<String>,
     pub credential_configured: bool,
+    pub credential_source: String,
     pub delivery: Option<ExporterHealth>,
     pub last_acknowledgement_unix_nanos: Option<u64>,
 }
@@ -146,6 +185,11 @@ pub fn collect_status(config: &Config) -> AppResult<OutputEnvelopeV1<FleetStatus
                 .then(|| config.fleet.policy_source.clone()),
             upload_scope: config.fleet.upload_scope.clone(),
             credential_configured: !config.fleet.credential.is_empty(),
+            credential_source: crate::credentials::CredentialResolver::status(
+                &config.fleet.credential_ref,
+            )
+            .source
+            .into(),
             delivery,
             last_acknowledgement_unix_nanos,
         },
@@ -165,28 +209,23 @@ pub fn print_status(config: &Config) {
     println!("Policy source: {}", config.fleet.policy_source);
     println!("Upload scope: {}", config.fleet.upload_scope.join(", "));
     println!("Credential: configured (not displayed)");
-    let exporter = std::fs::read_to_string(crate::config::daemon_health_path())
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|health| health.get("exporter").cloned());
+    let exporter = match crate::daemon_health::read(&crate::config::daemon_health_path()) {
+        Ok(snapshot) => Some(snapshot.health.exporter),
+        Err(error) => {
+            println!("Delivery: unavailable: {error}. Recovery: run `syspilot daemon`.");
+            None
+        }
+    };
     if let Some(exporter) = &exporter {
         println!(
             "Delivery: queued={} sent={} retried={} rejected={} dropped={} spool_bytes={} quarantined={} persistence_failures={}",
-            exporter["queued"].as_u64().unwrap_or(0),
-            exporter["sent"].as_u64().unwrap_or(0),
-            exporter["retried"].as_u64().unwrap_or(0),
-            exporter["rejected"].as_u64().unwrap_or(0),
-            exporter["dropped"].as_u64().unwrap_or(0),
-            exporter["spool_bytes"].as_u64().unwrap_or(0),
-            exporter["quarantined"].as_u64().unwrap_or(0),
-            exporter["persistence_failures"].as_u64().unwrap_or(0),
+            exporter.queued, exporter.sent, exporter.retried, exporter.rejected,
+            exporter.dropped, exporter.spool_bytes, exporter.quarantined,
+            exporter.persistence_failures,
         );
-    } else {
-        println!("Delivery: unavailable; daemon health has no exporter report");
     }
     let last_ack = exporter
-        .as_ref()
-        .and_then(|value| value["last_acknowledgement_unix_nanos"].as_u64())
+        .and_then(|value| value.last_acknowledgement_unix_nanos)
         .or(config.fleet.last_acknowledgement_unix_nanos);
     match last_ack {
         Some(value) => println!("Last acknowledgement: {value} ns since Unix epoch"),
@@ -197,33 +236,52 @@ pub fn print_status(config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_home(test: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("SYSPILOT_HOME");
+        std::env::set_var("SYSPILOT_HOME", directory.path());
+        test();
+        match previous {
+            Some(value) => std::env::set_var("SYSPILOT_HOME", value),
+            None => std::env::remove_var("SYSPILOT_HOME"),
+        }
+    }
     #[test]
     fn enrollment_requires_https() {
-        let mut cfg = Config::default();
-        assert!(enroll(
-            &mut cfg,
-            "http://fleet.example/ingest".into(),
-            "node".into(),
-            "token".into()
-        )
-        .is_err());
+        with_home(|| {
+            let mut cfg = Config::default();
+            assert!(enroll(
+                &mut cfg,
+                "http://fleet.example/ingest".into(),
+                "node".into(),
+                "token".into()
+            )
+            .is_err());
+        });
     }
     #[test]
     fn enrollment_uses_public_export_destination_and_disable_clears_secrets() {
-        let mut cfg = Config::default();
-        enroll(
-            &mut cfg,
-            "https://fleet.example/ingest".into(),
-            "node-a".into(),
-            "secret".into(),
-        )
-        .unwrap();
-        assert!(cfg.distributed_telemetry.enabled);
-        assert_eq!(cfg.distributed_telemetry.endpoint, cfg.fleet.endpoint);
-        disable(&mut cfg);
-        assert!(!cfg.fleet.enabled);
-        assert!(!cfg.distributed_telemetry.enabled);
-        assert!(cfg.fleet.credential.is_empty());
-        assert!(cfg.distributed_telemetry.bearer_token.is_empty());
+        with_home(|| {
+            let mut cfg = Config::default();
+            enroll(
+                &mut cfg,
+                "https://fleet.example/ingest".into(),
+                "node-a".into(),
+                "secret".into(),
+            )
+            .unwrap();
+            assert!(cfg.distributed_telemetry.enabled);
+            assert_eq!(cfg.distributed_telemetry.endpoint, cfg.fleet.endpoint);
+            assert!(!serde_json::to_string(&cfg).unwrap().contains("secret"));
+            disable(&mut cfg);
+            assert!(!cfg.fleet.enabled);
+            assert!(!cfg.distributed_telemetry.enabled);
+            assert!(cfg.fleet.credential.is_empty());
+            assert!(cfg.distributed_telemetry.bearer_token.is_empty());
+        });
     }
 }

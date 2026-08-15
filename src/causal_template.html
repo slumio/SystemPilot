@@ -2,113 +2,42 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SysPilot CausalTrace</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 <style>
-:root{{--bg:#0b0f17;--panel:rgba(17,24,39,.85);--border:rgba(56,189,248,.2);--text:#f1f5f9;--muted:#94a3b8;--cyan:#38bdf8;--blue:#0284c7;--red:#ef4444;--orange:#f97316;--yellow:#eab308}}
-*{{box-sizing:border-box}}
-body{{font-family:sans-serif;margin:0;background:var(--bg);color:var(--text);display:flex;flex-direction:column;height:100vh;overflow:hidden}}
-header{{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1.5rem;background:rgba(15,23,42,.9);border-bottom:1px solid var(--border)}}
-h1{{margin:0;font-size:1.3rem;background:linear-gradient(135deg,#38bdf8,#0284c7);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
-.badge{{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.4);color:#fca5a5;padding:.2rem .6rem;border-radius:9999px;font-size:.8rem}}
-.workspace{{display:flex;flex:1;overflow:hidden}}
-#cy{{flex:1;height:100%;background:radial-gradient(circle at 50% 50%,#111827 0%,#0b0f17 100%)}}
-.controls{{position:absolute;left:1.5rem;top:5rem;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.6rem;display:flex;flex-direction:column;gap:.4rem;backdrop-filter:blur(12px)}}
-.ctrl-btn{{background:rgba(30,41,59,.8);border:1px solid rgba(255,255,255,.1);color:var(--text);padding:.4rem .8rem;border-radius:6px;cursor:pointer;font-size:.75rem;font-weight:600}}
-.ctrl-btn:hover{{background:var(--blue);border-color:var(--cyan)}}
-.inspector{{width:340px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;backdrop-filter:blur(20px)}}
-.ins-header{{padding:1rem 1.2rem;border-bottom:1px solid rgba(255,255,255,.08)}}
-.ins-title{{margin:0;font-size:1rem;font-weight:700;color:var(--cyan)}}
-.ins-sub{{font-size:.75rem;color:var(--muted);margin-top:.2rem}}
-.ins-body{{padding:1.2rem;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:1rem}}
-.section-label{{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}}
-.metric{{background:rgba(30,41,59,.4);border:1px solid rgba(255,255,255,.05);border-radius:7px;padding:.6rem .9rem;display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem}}
-.metric-label{{font-size:.8rem;color:var(--muted)}}
-.metric-val{{font-size:.85rem;font-weight:600;font-family:monospace}}
-.alert-box{{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:7px;padding:.8rem;color:#fca5a5;font-size:.8rem;line-height:1.4}}
-.empty{{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);text-align:center;gap:.7rem}}
-.legend{{position:absolute;left:1.5rem;bottom:1.5rem;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.6rem .9rem;display:flex;flex-direction:column;gap:.4rem;font-size:.75rem}}
-.leg-item{{display:flex;align-items:center;gap:.5rem}}
-.leg-dot{{width:11px;height:11px;border-radius:3px}}
+:root{{--bg:#0b0f17;--panel:#111827;--border:#334155;--text:#f1f5f9;--muted:#94a3b8;--cyan:#38bdf8;--red:#ef4444}}
+*{{box-sizing:border-box}} body{{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--text)}}
+header{{padding:1rem 1.5rem;background:#0f172a;border-bottom:1px solid var(--border)}} h1{{margin:0;color:var(--cyan)}}
+.badge{{margin-top:.4rem;color:#fca5a5}} main{{padding:1.5rem;display:grid;grid-template-columns:minmax(0,2fr) minmax(18rem,1fr);gap:1rem}}
+#graph,.inspector{{background:var(--panel);border:1px solid var(--border);border-radius:.6rem;padding:1rem}}
+.node{{display:block;width:100%;text-align:left;margin:.5rem 0;padding:.75rem;border:1px solid var(--cyan);border-radius:.45rem;background:#082f49;color:var(--text);cursor:pointer}}
+.node.resource{{background:#1e293b;border-color:#64748b}} .node.anomalous{{background:#450a0a;border-color:var(--red)}}
+.edge{{color:var(--muted);padding-left:1rem;font:0.85rem monospace}} dt{{color:var(--muted);margin-top:.7rem}} dd{{margin-left:0;overflow-wrap:anywhere}}
+@media(max-width:760px){{main{{grid-template-columns:1fr}}}}
 </style>
 </head>
 <body>
-<header>
-  <h1>🌐 SysPilot CausalTrace</h1>
-  <div class="badge">Symptom: {symptom}</div>
-</header>
-<div class="workspace">
-  <div class="controls">
-    <button class="ctrl-btn" onclick="cy.fit()">Fit Screen</button>
-    <button class="ctrl-btn" onclick="resetFocus()">Reset Focus</button>
-  </div>
-  <div id="cy"></div>
-  <div class="legend">
-    <div class="leg-item"><div class="leg-dot" style="background:#0284c7;border:1px solid #38bdf8"></div>Process</div>
-    <div class="leg-item"><div class="leg-dot" style="background:#7f1d1d;border:1px solid #ef4444"></div>Anomalous</div>
-    <div class="leg-item"><div class="leg-dot" style="background:#111827;border:1px solid #475569"></div>Resource</div>
-  </div>
-  <div class="inspector">
-    <div class="ins-header">
-      <div class="ins-title" id="ins-title">Node Inspector</div>
-      <div class="ins-sub" id="ins-sub">Select a node to inspect</div>
-    </div>
-    <div class="ins-body" id="ins-body">
-      <div class="empty"><div>🔍</div><div>Click a node to view metrics</div></div>
-    </div>
-  </div>
-</div>
+<header><h1>SysPilot CausalTrace</h1><div class="badge" id="symptom"></div></header>
+<main><section id="graph" aria-label="Causal graph"></section><aside class="inspector"><h2>Node Inspector</h2><dl id="details"><dd>Select a node to inspect.</dd></dl></aside></main>
 <script>
+// Self-contained offline renderer; no Cytoscape or CDN network dependency.
 const elements = {elements_json};
-cytoscape.use(cytoscapeDagre);
-const cy = cytoscape({{
-  container: document.getElementById('cy'),
-  elements,
-  style:[
-    {{selector:'node',style:{{'label':'data(name)','color':'#f8fafc','font-size':'11px','text-valign':'center','text-halign':'center','background-color':'#0284c7','border-color':'#38bdf8','border-width':'2px','shape':'round-rectangle','width':'160px','height':'40px'}}}},
-    {{selector:'node[type="resource"]',style:{{'background-color':'#111827','border-color':'#475569','shape':'ellipse','width':'50px','height':'50px'}}}},
-    {{selector:'node[?is_anomalous]',style:{{'background-color':'#7f1d1d','border-color':'#ef4444','border-width':'3px'}}}},
-    {{selector:'edge',style:{{'width':2,'line-color':'#475569','target-arrow-color':'#475569','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(type)','font-size':'8px','color':'#94a3b8','text-rotation':'autorotate'}}}},
-    {{selector:'edge[type="WRITES_TO"]',style:{{'line-color':'#f97316','target-arrow-color':'#f97316'}}}},
-    {{selector:'edge[type="READS_FROM"]',style:{{'line-color':'#38bdf8','target-arrow-color':'#38bdf8'}}}},
-    {{selector:'edge[type="BLOCKED_ON"]',style:{{'line-color':'#ef4444','target-arrow-color':'#ef4444','width':3}}}},
-    {{selector:'edge[type="CONTENDS_WITH"]',style:{{'line-color':'#eab308','target-arrow-color':'#eab308'}}}},
-    {{selector:'.dim',style:{{'opacity':0.15}}}},
-    {{selector:'.hl',style:{{'border-width':'4px','z-index':100}}}}
-  ],
-  layout:{{name:'dagre',nodeSep:60,rankSep:80,rankDir:'TB'}}
-}});
-
-cy.on('tap','node',function(e){{
-  const d=e.target.data();
-  document.getElementById('ins-title').innerText=d.name;
-  document.getElementById('ins-sub').innerText='ID: '+d.id;
-  let h='';
-  if(d.is_anomalous) h+='<div class="section-label">Alert</div><div class="alert-box">⚠️ '+d.anomaly_reason+'</div>';
-  h+='<div class="section-label">Info</div>';
-  h+='<div class="metric"><span class="metric-label">Type</span><span class="metric-val">'+d.type.toUpperCase()+'</span></div>';
-  if(d.type==='process'){{
-    h+='<div class="metric"><span class="metric-label">PID</span><span class="metric-val">'+d.pid+'</span></div>';
-    h+='<div class="metric"><span class="metric-label">State</span><span class="metric-val">'+d.state+'</span></div>';
-    h+='<div class="metric"><span class="metric-label">CPU</span><span class="metric-val">'+(d.cpu_usage_pct||0).toFixed(1)+'%</span></div>';
-  }}
-  h+='<div class="section-label">I/O</div>';
-  h+='<div class="metric"><span class="metric-label">Read</span><span class="metric-val">'+(d.read_rate_kb||0).toFixed(1)+' KB/s</span></div>';
-  h+='<div class="metric"><span class="metric-label">Write</span><span class="metric-val">'+(d.write_rate_kb||0).toFixed(1)+' KB/s</span></div>';
-  document.getElementById('ins-body').innerHTML=h;
-  cy.elements().addClass('dim');
-  const path=e.target.successors().union(e.target.predecessors()).union(e.target);
-  path.removeClass('dim').addClass('hl');
-}});
-
-function resetFocus(){{
-  cy.elements().removeClass('dim').removeClass('hl');
-  document.getElementById('ins-title').innerText='Node Inspector';
-  document.getElementById('ins-sub').innerText='Select a node to inspect';
-  document.getElementById('ins-body').innerHTML='<div class="empty"><div>🔍</div><div>Click a node to view metrics</div></div>';
+const symptom = {symptom_json};
+document.getElementById('symptom').textContent = 'Symptom: ' + symptom;
+const graph = document.getElementById('graph');
+const details = document.getElementById('details');
+const nodes = elements.filter(element => element.data && !element.data.source);
+const edges = elements.filter(element => element.data && element.data.source);
+function addField(label,value){{const dt=document.createElement('dt');dt.textContent=label;const dd=document.createElement('dd');dd.textContent=String(value ?? 'unavailable');details.append(dt,dd)}}
+for(const element of nodes){{
+  const data=element.data; const button=document.createElement('button');
+  button.className='node '+data.type+(data.is_anomalous?' anomalous':'');
+  button.textContent=data.name+' ['+data.id+']';
+  button.addEventListener('click',()=>{{details.replaceChildren();for(const [key,value] of Object.entries(data)) addField(key,value)}});
+  graph.appendChild(button);
+  for(const edge of edges.filter(edge=>edge.data.source===data.id)){{const line=document.createElement('div');line.className='edge';line.textContent='↳ '+edge.data.type+' → '+edge.data.target;graph.appendChild(line)}}
 }}
+if(nodes.length===0) graph.textContent='No causal path was available.';
 </script>
 </body>
 </html>

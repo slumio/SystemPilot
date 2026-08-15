@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{Read, Write};
 use std::time::Duration;
 
 use crate::telemetry;
@@ -96,21 +95,13 @@ impl CausalGraph {
 
 // ── Daemon query ──────────────────────────────────────────────────────────────
 
-fn query_daemon() -> Option<String> {
-    let mut stream = crate::config::connect_daemon().ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .ok()?;
-    stream.write_all(b"{\"request\":\"process_tree\"}").ok()?;
-    let mut buf = String::new();
-    let _ = stream.read_to_string(&mut buf);
-    if buf.is_empty() {
-        None
-    } else {
-        Some(buf)
+fn query_daemon() -> Option<serde_json::Value> {
+    match crate::daemon_client::process_tree() {
+        Ok(response) => Some(response),
+        Err(error) => {
+            eprintln!("DEGRADED cause=\"{error}\" impact=\"causal analysis may miss daemon lifecycle data\" fallback=\"one bounded procfs snapshot\" recovery=\"start `syspilot daemon` and retry\"");
+            None
+        }
     }
 }
 
@@ -119,73 +110,57 @@ fn query_daemon() -> Option<String> {
 fn take_proc_snapshot() -> HashMap<i32, GraphNode> {
     let mut snap: HashMap<i32, GraphNode> = HashMap::with_capacity(512);
 
-    if let Some(res) = query_daemon() {
-        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&res) {
-            if j["status"].as_str() == Some("ok") {
-                if let Some(procs) = j["processes"].as_array() {
-                    for p in procs {
-                        let pid = p["pid"].as_i64().unwrap_or(0) as i32;
-                        if pid <= 0 {
-                            continue;
-                        }
-                        let pt = telemetry::collect_process_telemetry(pid);
-                        if pt.pid == 0 {
-                            continue;
-                        }
-                        let node = GraphNode {
-                            id: format!("pid:{}", pid),
-                            node_type: NodeType::Process,
-                            name: pt.name.clone(),
-                            pid,
-                            state: pt.state.clone(),
-                            read_bytes: pt.read_bytes,
-                            write_bytes: pt.write_bytes,
-                            read_rate_kb: 0.0,
-                            write_rate_kb: 0.0,
-                            cpu_usage_pct: (pt.utime + pt.stime) as f64,
-                            is_anomalous: false,
-                            anomaly_reason: String::new(),
-                        };
-                        snap.insert(pid, node);
+    if let Some(j) = query_daemon() {
+        if j["status"].as_str() == Some("ok") {
+            if let Some(procs) = j["processes"].as_array() {
+                for p in procs {
+                    let pid = p["pid"].as_i64().unwrap_or(0) as i32;
+                    if pid <= 0 {
+                        continue;
                     }
-                    return snap;
+                    let pt = telemetry::collect_process_telemetry(pid);
+                    if pt.pid == 0 {
+                        continue;
+                    }
+                    let node = GraphNode {
+                        id: format!("pid:{}", pid),
+                        node_type: NodeType::Process,
+                        name: pt.name.clone(),
+                        pid,
+                        state: pt.state.clone(),
+                        read_bytes: pt.read_bytes,
+                        write_bytes: pt.write_bytes,
+                        read_rate_kb: 0.0,
+                        write_rate_kb: 0.0,
+                        cpu_usage_pct: (pt.utime + pt.stime) as f64,
+                        is_anomalous: false,
+                        anomaly_reason: String::new(),
+                    };
+                    snap.insert(pid, node);
                 }
+                return snap;
             }
         }
     }
 
-    // Fallback: scan /proc
-    if let Ok(dir) = fs::read_dir("/proc") {
-        for entry in dir.flatten() {
-            let fname = entry.file_name();
-            let pid_str = fname.to_string_lossy();
-            if !pid_str.chars().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            let pid: i32 = match pid_str.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let pt = telemetry::collect_process_telemetry(pid);
-            if pt.pid == 0 {
-                continue;
-            }
-            let node = GraphNode {
-                id: format!("pid:{}", pid),
-                node_type: NodeType::Process,
-                name: pt.name.clone(),
-                pid,
-                state: pt.state.clone(),
-                read_bytes: pt.read_bytes,
-                write_bytes: pt.write_bytes,
-                read_rate_kb: 0.0,
-                write_rate_kb: 0.0,
-                cpu_usage_pct: (pt.utime + pt.stime) as f64,
-                is_anomalous: false,
-                anomaly_reason: String::new(),
-            };
-            snap.insert(pid, node);
-        }
+    let snapshot = crate::proc_snapshot::ProcSnapshot::shared(Duration::from_millis(250));
+    for pt in &snapshot.processes {
+        let pid = pt.pid;
+        let node = GraphNode {
+            id: format!("pid:{}", pid),
+            node_type: NodeType::Process,
+            name: pt.name.clone(),
+            pid,
+            state: pt.state.clone(),
+            read_bytes: pt.read_bytes,
+            write_bytes: pt.write_bytes,
+            read_rate_kb: 0.0,
+            write_rate_kb: 0.0,
+            cpu_usage_pct: (pt.utime + pt.stime) as f64,
+            is_anomalous: false,
+            anomaly_reason: String::new(),
+        };
+        snap.insert(pid, node);
     }
     snap
 }
@@ -199,11 +174,15 @@ impl CausalGraph {
 
         let bpftrace_log = "/tmp/syspilot_bpftrace.log";
         let ebpf_running = if use_ebpf && target_pid > 0 {
-            let has_priv = unsafe { libc::getuid() } == 0
+            let has_priv = nix::unistd::Uid::effective().is_root()
                 || utils::run_command_output("sudo -n true 2>/dev/null").1 == 0;
             if has_priv {
-                let _ = fs::remove_file(bpftrace_log);
-                let bin = if unsafe { libc::getuid() } == 0 {
+                if let Err(error) = fs::remove_file(bpftrace_log) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("⚠️  eBPF trace cleanup failed: {error}");
+                    }
+                }
+                let bin = if nix::unistd::Uid::effective().is_root() {
                     "bpftrace"
                 } else {
                     "sudo bpftrace"
@@ -243,7 +222,10 @@ impl CausalGraph {
         let snap2 = take_proc_snapshot();
         let disk2 = telemetry::get_disk_stats();
 
-        let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+        let clk_tck = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+            .ok()
+            .flatten()
+            .unwrap_or(100) as f64;
         let clk_tck = if clk_tck <= 0.0 { 100.0 } else { clk_tck };
 
         // Populate process nodes with rates
@@ -606,7 +588,11 @@ impl CausalGraph {
                     );
                 }
             }
-            let _ = fs::remove_file(bpftrace_log);
+            if let Err(error) = fs::remove_file(bpftrace_log) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("⚠️  eBPF trace cleanup failed: {error}");
+                }
+            }
         }
     }
 }
@@ -833,7 +819,9 @@ impl CausalGraph {
             }
         }
 
-        let elements_json = serde_json::to_string(&elements).unwrap_or_default();
+        let elements_json = script_safe_json(
+            &serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string()),
+        );
         let symptom = path_nodes
             .first()
             .and_then(|id| self.nodes.get(id))
@@ -849,7 +837,18 @@ impl CausalGraph {
         format!(
             include_str!("causal_template.html"),
             elements_json = elements_json,
-            symptom = symptom,
+            symptom_json = script_safe_json(
+                &serde_json::to_string(&symptom).unwrap_or_else(|_| "\"Unknown\"".into())
+            ),
         )
     }
+}
+
+fn script_safe_json(value: &str) -> String {
+    value
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }

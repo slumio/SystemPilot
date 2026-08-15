@@ -10,23 +10,61 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace --all-targets
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build release binary
         run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
-          name: syspilot-linux-x86_64
+          name: syspilot-${{ matrix.runner }}
           path: target/release/syspilot
           if-no-files-found: error
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Dependency vulnerability audit
+        run: cargo audit --deny warnings
+      - name: License and dependency policy
+        run: cargo deny check
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+
+  compatibility:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        image: [debian:12, ubuntu:24.04, fedora:42]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain prerequisites
+        run: |
+          if command -v apt-get; then apt-get update && apt-get install -y curl build-essential pkg-config; fi
+          if command -v dnf; then dnf install -y curl gcc gcc-c++ make pkgconf-pkg-config; fi
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - name: Restricted-procfs compatible build and tests
+        run: . "$HOME/.cargo/env" && cargo test --locked --workspace
 
   fleet-schema:
     runs-on: ubuntu-latest

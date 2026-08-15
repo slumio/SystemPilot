@@ -26,10 +26,27 @@ pub fn request(request: &str, timeout: Duration) -> AppResult<Value> {
 }
 
 pub fn events() -> AppResult<Value> {
-    request("events", Duration::from_millis(750))
+    let value = request("events", Duration::from_millis(750))?;
+    validate_typed_response(value, "events")
 }
 pub fn process_tree() -> AppResult<Value> {
-    request("process_tree", Duration::from_millis(500))
+    let value = request("process_tree", Duration::from_millis(500))?;
+    validate_typed_response(value, "processes")
+}
+
+fn validate_typed_response(value: Value, collection: &str) -> AppResult<Value> {
+    if value["status"].as_str() != Some("ok") {
+        return Err(AppError::Protocol(format!(
+            "daemon rejected request: {}",
+            value["message"].as_str().unwrap_or("unknown daemon error")
+        )));
+    }
+    if !value[collection].is_array() {
+        return Err(AppError::Protocol(format!(
+            "daemon response is missing {collection} array"
+        )));
+    }
+    Ok(value)
 }
 
 fn decode_response(response: &str) -> AppResult<Value> {
@@ -54,5 +71,14 @@ mod tests {
     fn accepts_json_response() {
         let value = decode_response(r#"{"status":"ok","processes":[]}"#).unwrap();
         assert_eq!(value["status"], "ok");
+    }
+    #[test]
+    fn typed_responses_reject_error_and_missing_collection() {
+        assert!(validate_typed_response(
+            serde_json::json!({"status":"error","message":"bad"}),
+            "processes"
+        )
+        .is_err());
+        assert!(validate_typed_response(serde_json::json!({"status":"ok"}), "processes").is_err());
     }
 }

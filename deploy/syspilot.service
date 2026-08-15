@@ -10,6 +10,12 @@ User=syspilot
 Group=syspilot
 Environment=SYSPILOT_HOME=/var/lib/syspilot
 Environment=SYSPILOT_RUNTIME_DIR=/run/syspilot
+# Resolve optional credentials from systemd's credential store. Administrators
+# may provision these under /etc/credstore; absence keeps local diagnostics live.
+LoadCredential=gemini-api-key
+LoadCredential=syspilot-api-key
+LoadCredential=telemetry-token
+LoadCredential=fleet-token
 ExecStart=/usr/bin/syspilot daemon
 Restart=on-failure
 RestartSec=3s

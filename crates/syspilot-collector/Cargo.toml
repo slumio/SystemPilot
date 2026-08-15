@@ -8,4 +8,5 @@ repository = "https://github.com/slumio/SystemPilot"
 homepage = "https://github.com/slumio/SystemPilot"
 
 [dependencies]
+crossbeam-queue = "=0.3.12"
 syspilot-abi = { version = "0.1.0", path = "../syspilot-abi" }

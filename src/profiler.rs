@@ -109,8 +109,13 @@ pub fn profile_process(pid: i32, run_perf: bool) -> ProfileReport {
             let (perf_out, _) = crate::utils::run_command_output(&report_cmd);
 
             // Clean up
-            let _ = fs::remove_file(&perf_data);
-            let _ = fs::remove_file("perf.data");
+            for path in [&perf_data, "perf.data"] {
+                if let Err(error) = fs::remove_file(path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("⚠️  Profiler cleanup failed for {path}: {error}");
+                    }
+                }
+            }
 
             if !perf_out.is_empty() {
                 for (i, line) in perf_out.lines().enumerate() {

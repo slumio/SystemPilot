@@ -87,7 +87,9 @@ impl AlertStore {
             .open(&temporary)
             .map_err(|e| AppError::io("could not create temporary alert state", e))?;
         if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
-            let _ = fs::remove_file(&temporary);
+            if let Err(cleanup) = fs::remove_file(&temporary) {
+                eprintln!("alert-state temporary-file cleanup failed: {cleanup}");
+            }
             return Err(AppError::io("could not persist alert state", error));
         }
         fs::rename(&temporary, &self.path)

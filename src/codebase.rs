@@ -2,7 +2,8 @@ use crate::config::Config;
 use crate::utils;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -28,12 +29,21 @@ pub struct RawChunk {
     pub end_line: u32,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct VectorDb {
     pub workspace_path: String,
     pub embedding_source: String,
     pub files: Vec<FileRegistry>,
     pub chunks: Vec<DbChunk>,
+}
+#[derive(Debug)]
+pub enum VectorIndexLoad {
+    Missing,
+    Loaded(VectorDb),
+    Corrupt {
+        error: String,
+        quarantined_to: Option<PathBuf>,
+    },
 }
 
 // ── Binary serialization ──────────────────────────────────────────────────────
@@ -59,32 +69,46 @@ fn read_str(inp: &mut dyn Read) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+fn checked_count(raw: [u8; 4], kind: &str, limit: usize) -> std::io::Result<usize> {
+    let count = u32::from_le_bytes(raw) as usize;
+    if count > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{kind} count exceeds safety limit"),
+        ));
+    }
+    Ok(count)
+}
+
 impl VectorDb {
     // V3 records the embedding source so vectors from different models are
     // never compared or reused together.
     const MAGIC: &'static [u8] = b"SYSPILOT_VDB_3";
 
-    pub fn load_from_binary(path: &str) -> Option<Self> {
-        let mut f = std::fs::File::open(path).ok()?;
+    fn decode_binary(path: &str) -> std::io::Result<Self> {
+        let mut f = std::fs::File::open(path)?;
         let mut magic = [0u8; 14];
-        f.read_exact(&mut magic).ok()?;
+        f.read_exact(&mut magic)?;
         if magic != Self::MAGIC {
-            return None;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unrecognized vector-index format",
+            ));
         }
 
-        let workspace_path = read_str(&mut f).ok()?;
-        let embedding_source = read_str(&mut f).ok()?;
+        let workspace_path = read_str(&mut f)?;
+        let embedding_source = read_str(&mut f)?;
 
         let mut cnt_buf = [0u8; 4];
-        f.read_exact(&mut cnt_buf).ok()?;
-        let files_count = u32::from_le_bytes(cnt_buf) as usize;
+        f.read_exact(&mut cnt_buf)?;
+        let files_count = checked_count(cnt_buf, "file", 1_000_000)?;
         let mut files = Vec::with_capacity(files_count);
         for _ in 0..files_count {
-            let file_path = read_str(&mut f).ok()?;
+            let file_path = read_str(&mut f)?;
             let mut tmp = [0u8; 8];
-            f.read_exact(&mut tmp).ok()?;
+            f.read_exact(&mut tmp)?;
             let last_modified = u64::from_le_bytes(tmp);
-            f.read_exact(&mut tmp).ok()?;
+            f.read_exact(&mut tmp)?;
             let size = u64::from_le_bytes(tmp);
             files.push(FileRegistry {
                 file_path,
@@ -93,28 +117,34 @@ impl VectorDb {
             });
         }
 
-        f.read_exact(&mut cnt_buf).ok()?;
-        let chunks_count = u32::from_le_bytes(cnt_buf) as usize;
+        f.read_exact(&mut cnt_buf)?;
+        let chunks_count = checked_count(cnt_buf, "chunk", 1_000_000)?;
         let mut chunks = Vec::with_capacity(chunks_count);
         for _ in 0..chunks_count {
-            let file_path = read_str(&mut f).ok()?;
-            let content = read_str(&mut f).ok()?;
+            let file_path = read_str(&mut f)?;
+            let content = read_str(&mut f)?;
             let mut u32_buf = [0u8; 4];
-            f.read_exact(&mut u32_buf).ok()?;
+            f.read_exact(&mut u32_buf)?;
             let start_line = u32::from_le_bytes(u32_buf);
-            f.read_exact(&mut u32_buf).ok()?;
+            f.read_exact(&mut u32_buf)?;
             let end_line = u32::from_le_bytes(u32_buf);
-            f.read_exact(&mut u32_buf).ok()?;
+            f.read_exact(&mut u32_buf)?;
             let embed_len = u32::from_le_bytes(u32_buf) as usize;
             if embed_len > 8192 {
-                return None;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "embedding dimension exceeds safety limit",
+                ));
             }
             let mut embed = vec![0f32; embed_len];
             let byte_len = embed_len * 4;
             let mut bytes = vec![0u8; byte_len];
-            f.read_exact(&mut bytes).ok()?;
+            f.read_exact(&mut bytes)?;
             for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-                embed[i] = f32::from_le_bytes(chunk.try_into().unwrap());
+                let encoded: [u8; 4] = chunk.try_into().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid embedding")
+                })?;
+                embed[i] = f32::from_le_bytes(encoded);
             }
             chunks.push(DbChunk {
                 file_path,
@@ -125,7 +155,7 @@ impl VectorDb {
             });
         }
 
-        Some(VectorDb {
+        Ok(VectorDb {
             workspace_path,
             embedding_source,
             files,
@@ -133,31 +163,85 @@ impl VectorDb {
         })
     }
 
+    pub fn load_outcome(path: &str) -> VectorIndexLoad {
+        let source = Path::new(path);
+        if !source.exists() {
+            return VectorIndexLoad::Missing;
+        }
+        let decode_error = match Self::decode_binary(path) {
+            Ok(db) => return VectorIndexLoad::Loaded(db),
+            Err(error) => error,
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let quarantine = source.with_extension(format!("corrupt-{stamp}"));
+        let (quarantined_to, quarantine_error) = match std::fs::rename(source, &quarantine) {
+            Ok(()) => (Some(quarantine), None),
+            Err(error) => (None, Some(error)),
+        };
+        VectorIndexLoad::Corrupt {
+            error: match quarantine_error {
+                Some(error) => format!(
+                    "invalid vector-index data ({decode_error}); quarantine failed: {error}"
+                ),
+                None => format!("invalid vector-index data: {decode_error}"),
+            },
+            quarantined_to,
+        }
+    }
+
     pub fn save_to_binary(&self, path: &str) -> std::io::Result<()> {
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(Self::MAGIC)?;
-        write_str(&mut f, &self.workspace_path)?;
-        write_str(&mut f, &self.embedding_source)?;
+        let destination = Path::new(path);
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let temporary = parent.join(format!(
+            ".vector-index-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let write_result = (|| {
+            f.write_all(Self::MAGIC)?;
+            write_str(&mut f, &self.workspace_path)?;
+            write_str(&mut f, &self.embedding_source)?;
 
-        f.write_all(&(self.files.len() as u32).to_le_bytes())?;
-        for reg in &self.files {
-            write_str(&mut f, &reg.file_path)?;
-            f.write_all(&reg.last_modified.to_le_bytes())?;
-            f.write_all(&reg.size.to_le_bytes())?;
-        }
-
-        f.write_all(&(self.chunks.len() as u32).to_le_bytes())?;
-        for chunk in &self.chunks {
-            write_str(&mut f, &chunk.file_path)?;
-            write_str(&mut f, &chunk.content)?;
-            f.write_all(&chunk.start_line.to_le_bytes())?;
-            f.write_all(&chunk.end_line.to_le_bytes())?;
-            f.write_all(&(chunk.embedding.len() as u32).to_le_bytes())?;
-            for v in &chunk.embedding {
-                f.write_all(&v.to_le_bytes())?;
+            f.write_all(&(self.files.len() as u32).to_le_bytes())?;
+            for reg in &self.files {
+                write_str(&mut f, &reg.file_path)?;
+                f.write_all(&reg.last_modified.to_le_bytes())?;
+                f.write_all(&reg.size.to_le_bytes())?;
             }
+
+            f.write_all(&(self.chunks.len() as u32).to_le_bytes())?;
+            for chunk in &self.chunks {
+                write_str(&mut f, &chunk.file_path)?;
+                write_str(&mut f, &chunk.content)?;
+                f.write_all(&chunk.start_line.to_le_bytes())?;
+                f.write_all(&chunk.end_line.to_le_bytes())?;
+                f.write_all(&(chunk.embedding.len() as u32).to_le_bytes())?;
+                for v in &chunk.embedding {
+                    f.write_all(&v.to_le_bytes())?;
+                }
+            }
+            f.sync_all()
+        })();
+        if let Err(error) = write_result {
+            if let Err(cleanup) = std::fs::remove_file(&temporary) {
+                eprintln!("vector-index temporary-file cleanup failed: {cleanup}");
+            }
+            return Err(error);
         }
-        Ok(())
+        std::fs::rename(&temporary, destination)?;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::File::open(parent)?.sync_all()
     }
 }
 
@@ -517,7 +601,12 @@ fn fetch_embeddings(texts: &[String], config: &Config) -> Vec<Vec<f32>> {
 
 fn get_db_path(workspace: &str) -> String {
     let dir = crate::config::get_syspilot_dir().join("vector_dbs");
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "❌ Could not create vector-index directory {}: {error}",
+            dir.display()
+        );
+    }
     let safe: String = workspace
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -532,7 +621,22 @@ fn get_db_path(workspace: &str) -> String {
 pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
     let db_path = get_db_path(workspace);
     let mut db = if !force {
-        VectorDb::load_from_binary(&db_path).unwrap_or_default()
+        match VectorDb::load_outcome(&db_path) {
+            VectorIndexLoad::Missing => VectorDb::default(),
+            VectorIndexLoad::Loaded(db) => db,
+            VectorIndexLoad::Corrupt {
+                error,
+                quarantined_to,
+            } => {
+                let evidence = quarantined_to
+                    .as_deref()
+                    .map(Path::display)
+                    .map(|path| path.to_string())
+                    .unwrap_or_else(|| "quarantine failed".into());
+                eprintln!("❌ Vector index is corrupt: {error}; evidence: {evidence}. Run `syspilot index --force` to rebuild.");
+                return false;
+            }
+        }
     } else {
         VectorDb::default()
     };
@@ -632,7 +736,10 @@ pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
         }
     }
 
-    let _ = db.save_to_binary(&db_path);
+    if let Err(error) = db.save_to_binary(&db_path) {
+        eprintln!("❌ Could not write vector index at {db_path}: {error}");
+        return false;
+    }
     println!("✅ Vector index stored.");
     true
 }
@@ -640,8 +747,19 @@ pub fn update_index(workspace: &str, config: &Config, force: bool) -> bool {
 pub fn query_context(workspace: &str, query: &str, config: &Config) -> String {
     update_index(workspace, config, false);
     let db_path = get_db_path(workspace);
-    let db = match VectorDb::load_from_binary(&db_path) {
-        Some(d) if !d.chunks.is_empty() => d,
+    let db = match VectorDb::load_outcome(&db_path) {
+        VectorIndexLoad::Loaded(db) if !db.chunks.is_empty() => db,
+        VectorIndexLoad::Corrupt {
+            error,
+            quarantined_to,
+        } => {
+            let evidence = quarantined_to
+                .as_deref()
+                .map(Path::display)
+                .map(|path| path.to_string())
+                .unwrap_or_else(|| "quarantine failed".into());
+            return format!("Vector index is corrupt: {error}; evidence: {evidence}. Run `syspilot index --force`.");
+        }
         _ => return "No indexed files found.".to_string(),
     };
 

@@ -14,6 +14,8 @@ pub struct DaemonHealthV1 {
     pub socket: String,
     pub netlink_state: String,
     pub dropped_events: u64,
+    #[serde(default)]
+    pub response_write_failures: u64,
     pub exporter: ExporterHealth,
 }
 

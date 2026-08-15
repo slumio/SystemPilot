@@ -284,7 +284,8 @@ fn html_export_is_html_document() {
         "HTML must contain doctype"
     );
     assert!(html.contains("</html>"), "HTML must be closed");
-    assert!(html.contains("cytoscape"), "HTML must embed Cytoscape.js");
+    assert!(html.contains("offline renderer"));
+    assert!(!html.contains("https://"));
 }
 
 #[test]
@@ -303,6 +304,23 @@ fn html_export_embeds_elements_json() {
         html.contains("myapp"),
         "HTML must reference the symptom process name"
     );
+}
+
+#[test]
+fn html_export_escapes_script_termination_and_has_no_remote_assets() {
+    let mut graph = CausalGraph::new();
+    let node = make_process(
+        "pid:9",
+        9,
+        "</script><script>alert(1)</script>",
+        true,
+        "<unsafe>",
+    );
+    graph.nodes.insert(node.id.clone(), node);
+    let html = graph.export_graph_to_html(&["pid:9".into()]);
+    assert!(!html.contains("</script><script>alert(1)</script>"));
+    assert!(html.contains("\\u003c/script\\u003e"));
+    assert!(!html.contains("src=\"http"));
 }
 
 // ── Anomaly detection (rules from build_graph) ────────────────────────────────

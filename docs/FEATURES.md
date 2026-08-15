@@ -43,13 +43,14 @@ Export is disabled by default. Redaction occurs before durable spool persistence
 | Data | Default location | Mode/ownership |
 |---|---|---|
 | Configuration | `~/.syspilot/config.json` | User directory `0700`, file `0600` |
+| Credential files | `~/.syspilot/credentials/*` | Directory `0700`, files `0600` |
 | Migration backups | Beside configuration | `0600`, never overwritten with different bytes |
 | Evidence cases | `~/.syspilot/cases/*.json` | Directory `0700`, files `0600` |
 | Support bundles | `~/.syspilot/support/*.json` | Directory `0700`, files `0600` |
 | Alert state/spool | SysPilot data directory | Service/user-only |
 | Runtime health/socket | `/run/syspilot` for packages; per-user runtime otherwise | Service policy |
 
-Environment variables: `SYSPILOT_HOME` selects the data directory; `SYSPILOT_RUNTIME_DIR` selects runtime state; `GEMINI_API_KEY`, `SYSPILOT_API_KEY`, and `SYSPILOT_FLEET_TOKEN` provide runtime credentials. Support bundles redact persisted credentials and do not copy environment values.
+Environment variables: `SYSPILOT_HOME` selects the data directory; `SYSPILOT_RUNTIME_DIR` selects runtime state; `GEMINI_API_KEY`, `SYSPILOT_API_KEY`, and `SYSPILOT_FLEET_TOKEN` provide runtime credentials. Schema v2 stores only credential source metadata. Runtime values resolve through `CredentialRef` from environment, owner-only files, or systemd's `CREDENTIALS_DIRECTORY`. Support bundles reveal source/availability but never credential values.
 
 ## Exit semantics
 
