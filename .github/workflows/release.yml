@@ -59,7 +59,7 @@ jobs:
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
-          path: target/${{ matrix.target }}/release/syspilot
+          file: target/${{ matrix.target }}/release/syspilot
           artifact-name: syspilot-${{ matrix.target }}.spdx.json
           output-file: dist/syspilot-${{ matrix.target }}.spdx.json
           upload-artifact: false
