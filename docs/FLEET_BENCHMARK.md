@@ -14,7 +14,7 @@ The default run simulates 1,000 servers, one request per server per second, 16 e
 
 ## CI gate
 
-The `fleet-transport-benchmark` job in `.github/workflows/ci.yml` runs the same 1,000-server scenario for every push to `dev` or `master` and for every pull request. The separate `fleet-peak-benchmark` job runs 16 continuously active senders with 1,024-record batches and requires at least 750,000 envelopes/second, no more than 0.1% failures, and p95 latency no greater than 100 ms. Both jobs upload their JSON report even after failure, so regressions remain inspectable.
+The `fleet-transport-benchmark` job in `.github/workflows/ci.yml` runs the same 1,000-server scenario for every push to `main` and for every pull request. The separate `fleet-peak-benchmark` job runs 16 continuously active senders with 1,024-record batches and requires at least 750,000 envelopes/second, no more than 0.1% failures, and p95 latency no greater than 100 ms. Both jobs upload their JSON report even after failure, so regressions remain inspectable.
 
 This gate intentionally uses a fixed synthetic workload. Increase the published capacity only through a reviewed change that includes the new result and runner specification; do not silently weaken latency or failure thresholds.
 
