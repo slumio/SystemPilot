@@ -557,7 +557,8 @@ async fn insert_envelope(
         "INSERT INTO syspilot_control.telemetry_messages
          (tenant_id,node_id,message_id,sequence,schema_version,kind,observed_at,envelope,envelope_digest)
          VALUES ($1,$2,$3,$4,$5,$6,
-           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',$9,$10)
+           TIMESTAMPTZ 'epoch' + make_interval(secs => $7::double precision)
+             + ($8::bigint / 1000) * INTERVAL '1 microsecond',$9,$10)
          ON CONFLICT DO NOTHING RETURNING true",
     )
     .bind(tenant_id)
@@ -647,8 +648,10 @@ async fn materialize_alert(
         "INSERT INTO syspilot_control.alerts
          (tenant_id,alert_instance_id,node_id,rule_id,state,payload,first_observed_at,last_transition_at)
          VALUES ($1,$2,$3,$4,$5,$6,
-           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond',
-           TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 second' + $8 * INTERVAL '1 nanosecond')
+           TIMESTAMPTZ 'epoch' + make_interval(secs => $7::double precision)
+             + ($8::bigint / 1000) * INTERVAL '1 microsecond',
+           TIMESTAMPTZ 'epoch' + make_interval(secs => $7::double precision)
+             + ($8::bigint / 1000) * INTERVAL '1 microsecond')
          ON CONFLICT (tenant_id,alert_instance_id) DO UPDATE SET
            state=EXCLUDED.state,payload=EXCLUDED.payload,last_transition_at=EXCLUDED.last_transition_at",
     )

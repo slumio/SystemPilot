@@ -140,11 +140,8 @@ impl VectorDb {
             let byte_len = embed_len * 4;
             let mut bytes = vec![0u8; byte_len];
             f.read_exact(&mut bytes)?;
-            for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-                let encoded: [u8; 4] = chunk.try_into().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid embedding")
-                })?;
-                embed[i] = f32::from_le_bytes(encoded);
+            for (value, encoded) in embed.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                *value = f32::from_le_bytes(*encoded);
             }
             chunks.push(DbChunk {
                 file_path,
