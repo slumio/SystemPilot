@@ -1,6 +1,6 @@
 [package]
 name = "syspilot"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["SysPilot Contributors"]
 description = "Linux process diagnostics and operating-system reasoning CLI"
