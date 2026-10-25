@@ -95,11 +95,14 @@ syspilot completions fish
 ```bash
 git clone https://github.com/slumio/SystemPilot.git syspilot
 cd syspilot
-cargo build --release
-./target/release/syspilot setup
+./build-install.sh
+syspilot setup
 ```
 
-Use `cargo build --release` for a portable release binary.
+`build-install.sh` builds the locked release binary and installs it to
+`~/.local/bin/syspilot` in one command. It requires a Rust toolchain with
+`cargo` available. Use `cargo build --release --locked` directly when you
+only need a portable binary and do not want to install it.
 
 ### Individual installation actions
 
