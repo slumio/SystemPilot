@@ -70,7 +70,7 @@ This document describes the behavior implemented in this repository. It does not
 ### One-command install
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/slumio/SystemPilot/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/slumio/SystemPilot/master/install.sh | sh
 syspilot setup
 syspilot status
 syspilot ask "Why is Linux load average high?"
