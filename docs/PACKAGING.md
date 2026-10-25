@@ -17,8 +17,8 @@ must belong to the `syspilot` group and start a new login session afterward.
 
 ## Release assets
 
-The installer recognizes `syspilot-x86_64-unknown-linux-gnu.tar.gz` and
-`syspilot-aarch64-unknown-linux-gnu.tar.gz`. Each archive must contain an
+The installer recognizes `syspilot-x86_64-unknown-linux-musl.tar.gz` and
+`syspilot-aarch64-unknown-linux-musl.tar.gz`. Each archive must contain an
 executable named `syspilot` and have a sibling `<archive>.sha256` asset whose
 first field is the lowercase SHA-256 digest. Missing assets, unsupported architectures, download failures, and digest mismatches are hard failures and never alter or execute the installed binary.
 

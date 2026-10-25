@@ -17,8 +17,8 @@ trap 'rm -rf "$install_dir"' EXIT HUP INT TERM
 
 architecture=$(uname -m)
 case "$architecture" in
-    x86_64) release_target="x86_64-unknown-linux-gnu" ;;
-    aarch64|arm64) release_target="aarch64-unknown-linux-gnu" ;;
+    x86_64) release_target="x86_64-unknown-linux-musl" ;;
+    aarch64|arm64) release_target="aarch64-unknown-linux-musl" ;;
     *) release_target="" ;;
 esac
 
